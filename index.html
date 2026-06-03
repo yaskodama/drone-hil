@@ -1130,6 +1130,96 @@ resize();
 resetSim();
 requestAnimationFrame(frame);
 </script>
+<!-- ── MANET communication layer: comm range, dynamic links, multi-hop routing ── -->
+<script>
+(function(){
+  const R = 0.30;                       // comm range (normalised units)
+  const RELAYS = [ {id:'R1',x:0.30,y:0.40}, {id:'R2',x:0.52,y:0.58}, {id:'R3',x:0.74,y:0.42} ];
+  let tick = 0;
+  let manetOn = true;
+
+  // toggle button (top-right of the stage)
+  const btn = document.createElement('button');
+  btn.textContent = 'MANET: ON';
+  btn.style.cssText = 'position:absolute;right:8px;top:8px;z-index:50;font:11px ui-monospace,monospace;'
+    + 'background:#0b1020;color:#7cf2c2;border:1px solid #3a4a82;border-radius:6px;padding:4px 8px;cursor:pointer';
+  btn.onclick = ()=>{ manetOn=!manetOn; btn.textContent='MANET: '+(manetOn?'ON':'off'); btn.style.color=manetOn?'#7cf2c2':'#7c8bb8'; };
+  const stage = document.getElementById('stage'); if (stage) stage.appendChild(btn);
+
+  function nodes(){
+    const a = [];
+    if (typeof uav1!=='undefined' && uav1) a.push({id:'UAV1',x:uav1.x,y:uav1.y,kind:'uav',col:getCSS('--uav1')});
+    if (typeof uav2!=='undefined' && uav2) a.push({id:'UAV2',x:uav2.x,y:uav2.y,kind:'uav',col:getCSS('--uav2')});
+    a.push({id:'GS',x:N('A').x,y:N('A').y,kind:'gs',col:getCSS('--shelter')});      // ground station = shelter A
+    for (const r of RELAYS) a.push({id:r.id,x:r.x,y:r.y,kind:'relay',col:'#9fb3ff'});
+    return a;
+  }
+  function dist(p,q){ return Math.hypot(p.x-q.x,p.y-q.y); }
+  function links(ns){
+    const L=[]; for (let i=0;i<ns.length;i++) for (let j=i+1;j<ns.length;j++)
+      if (dist(ns[i],ns[j])<=R) L.push([i,j]); return L;
+  }
+  function route(ns,L,from,to){                 // BFS shortest-hop path of ids
+    const idx={}; ns.forEach((n,i)=>idx[n.id]=i);
+    const adj=ns.map(()=>[]); for(const[a,b]of L){adj[a].push(b);adj[b].push(a);}
+    const s=idx[from], t=idx[to]; if(s==null||t==null) return null;
+    const prev=new Array(ns.length).fill(-1), seen=new Array(ns.length).fill(false);
+    const q=[s]; seen[s]=true;
+    while(q.length){ const u=q.shift(); if(u===t) break;
+      for(const v of adj[u]) if(!seen[v]){seen[v]=true;prev[v]=u;q.push(v);} }
+    if(!seen[t]) return null;
+    const path=[]; for(let u=t;u!==-1;u=prev[u]) path.unshift(u); return path;
+  }
+  function px(n){ return [n.x*W, n.y*H]; }
+
+  const _draw = draw;
+  window.draw = function(){
+    _draw.apply(this, arguments);               // sim's own rendering first
+    if (!manetOn) return;
+    tick++;
+    const ns = nodes(), L = links(ns);
+    // comm-range ellipses (normalised circle -> ellipse in WxH pixels)
+    for (const n of ns){ const [x,y]=px(n);
+      ctx.save(); ctx.strokeStyle=n.col+'22'; ctx.fillStyle=n.col+'0c'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.ellipse(x,y,R*W,R*H,0,0,Math.PI*2); ctx.fill(); ctx.stroke(); ctx.restore(); }
+    // active links
+    ctx.save(); ctx.strokeStyle='rgba(124,242,194,0.35)'; ctx.lineWidth=1.2;
+    for (const [a,b] of L){ const [ax,ay]=px(ns[a]),[bx,by]=px(ns[b]);
+      ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke(); }
+    ctx.restore();
+    // relays + GS markers
+    for (const n of ns) if (n.kind!=='uav'){ const [x,y]=px(n);
+      ctx.save(); ctx.fillStyle=n.col; ctx.strokeStyle='#0b1020'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle=n.col; ctx.font='9px ui-monospace,monospace'; ctx.fillText(n.id,x+7,y-6); ctx.restore(); }
+    // multi-hop route UAV1 -> ground station, highlighted + animated
+    let status='';
+    for (const src of ['UAV1','UAV2']){
+      const rt = route(ns, L, src, 'GS');
+      const col = src==='UAV1'?getCSS('--uav1'):getCSS('--uav2');
+      if (rt && rt.length>1){
+        ctx.save(); ctx.strokeStyle=col; ctx.lineWidth=2.4; ctx.setLineDash([8,6]);
+        ctx.lineDashOffset = -(tick*0.6); ctx.beginPath();
+        rt.forEach((i,k)=>{ const [x,y]=px(ns[i]); k?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+        ctx.stroke(); ctx.setLineDash([]);
+        // moving packet
+        const seg=(tick*0.01)% (rt.length-1); const i0=rt[Math.floor(seg)], i1=rt[Math.min(rt.length-1,Math.floor(seg)+1)];
+        const f=seg-Math.floor(seg); const [x0,y0]=px(ns[i0]),[x1,y1]=px(ns[i1]);
+        ctx.fillStyle='#ffffff'; ctx.beginPath(); ctx.arc(x0+(x1-x0)*f,y0+(y1-y0)*f,3,0,Math.PI*2); ctx.fill();
+        ctx.restore();
+        status += `${src}→GS: ${rt.length-1} hop  `;
+      } else {
+        status += `${src}→GS: NO ROUTE  `;
+      }
+    }
+    // status line
+    ctx.save(); ctx.fillStyle='rgba(11,16,32,0.7)'; ctx.fillRect(8,H-30,300,20);
+    ctx.fillStyle='#7cf2c2'; ctx.font='11px ui-monospace,monospace';
+    ctx.fillText('MANET  '+status, 14, H-16); ctx.restore();
+  };
+})();
+</script>
+
 <!-- ── HIL bridge: map UAV1→UAV2 coordination to a REAL WiFi MANET message ── -->
 <script>
 (function(){
