@@ -1,0 +1,1178 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>UAV 災害避難支援システム シミュレータ — M-006 再現実験</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<style>
+  :root{
+    --bg:#0b1020;
+    --grid:#1b2540;
+    --line:#9fb3ff;
+    --line-dim:#3a4a82;
+    --ink:#dfe7ff;
+    --ink-dim:#7c8bb8;
+    --accent:#7cf2c2;
+    --warn:#ffd66b;
+    --danger:#ff6b8a;
+    --uav1:#7cf2c2;
+    --uav2:#ffd66b;
+    --shelter:#79b8ff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font-family:"Inter","Hiragino Sans","Yu Gothic UI",sans-serif;
+    font-feature-settings:"tnum";}
+  header{
+    border-bottom:1px solid var(--line-dim);
+    padding:10px 18px;display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
+  }
+  header h1{font-size:14px;letter-spacing:.08em;font-weight:600;margin:0;text-transform:uppercase}
+  header .meta{font-size:11px;color:var(--ink-dim);letter-spacing:.06em}
+  main{display:grid;grid-template-columns:1fr 320px;gap:0;height:calc(100vh - 44px)}
+  #stage{position:relative;border-right:1px solid var(--line-dim);overflow:hidden;background:
+    linear-gradient(transparent 0 calc(100% - 1px), var(--grid) calc(100% - 1px) 100%) 0 0/24px 24px,
+    linear-gradient(90deg, transparent 0 calc(100% - 1px), var(--grid) calc(100% - 1px) 100%) 0 0/24px 24px,
+    radial-gradient(ellipse at 30% 20%, #14213f, var(--bg) 70%);
+  }
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  aside{padding:14px 16px;display:flex;flex-direction:column;gap:14px;overflow:auto}
+  .panel{border:1px solid var(--line-dim);padding:10px 12px;border-radius:2px;background:rgba(255,255,255,.02)}
+  .panel h2{font-size:11px;letter-spacing:.12em;font-weight:600;margin:0 0 8px;
+    text-transform:uppercase;color:var(--ink-dim);border-bottom:1px dashed var(--line-dim);padding-bottom:6px}
+  .row{display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:3px 0}
+  .row .k{color:var(--ink-dim)}
+  .row .v{font-variant-numeric:tabular-nums}
+  .legend{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:11px;color:var(--ink-dim)}
+  .swatch{width:14px;height:14px;border:1px solid var(--ink);display:inline-block}
+  .controls{display:flex;flex-wrap:wrap;gap:6px}
+  button{font:inherit;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    background:transparent;border:1px solid var(--line);color:var(--ink);
+    padding:6px 10px;cursor:pointer;border-radius:2px}
+  button:hover{background:rgba(159,179,255,.08)}
+  button.primary{border-color:var(--accent);color:var(--accent)}
+  button.warn{border-color:var(--warn);color:var(--warn)}
+  table{width:100%;border-collapse:collapse;font-size:11px;font-variant-numeric:tabular-nums}
+  th,td{padding:2px 4px;text-align:right;border-bottom:1px dashed var(--line-dim)}
+  th:first-child,td:first-child{text-align:left;color:var(--ink-dim)}
+  th{color:var(--ink-dim);font-weight:500;letter-spacing:.05em;text-transform:uppercase;font-size:10px}
+  .log{height:140px;overflow:auto;font-size:11px;font-family:ui-monospace,Menlo,monospace;
+    line-height:1.45;color:var(--ink-dim);white-space:pre-wrap}
+  .log .t{color:#a5e2ff}
+  .log .u1{color:var(--uav1)}
+  .log .u2{color:var(--uav2)}
+  .log .ev{color:var(--ink)}
+  .badge{display:inline-block;padding:1px 6px;border:1px solid currentColor;border-radius:8px;font-size:10px}
+  .pill{padding:2px 6px;border:1px solid var(--line-dim);border-radius:8px;font-size:10px;color:var(--ink-dim)}
+  input[type=range]{width:100%}
+  .slider-row{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink-dim)}
+  footer{font-size:10px;color:var(--ink-dim);padding:0 16px 12px}
+
+  /* ── mode toggle bar ── */
+  #mode-bar{position:fixed;top:8px;right:14px;display:flex;gap:8px;z-index:50}
+  .mode-btn{
+    padding:8px 14px;
+    background:rgba(0,63,140,0.42);
+    border:1px solid rgba(255,255,255,0.18);
+    border-radius:10px;color:#cfd9ec;
+    font:500 12px/1 inherit;letter-spacing:.06em;
+    cursor:pointer;backdrop-filter:blur(8px);
+    transition:transform .12s ease, background .15s ease, color .15s ease, box-shadow .15s ease;
+  }
+  .mode-btn:hover{background:rgba(0,63,140,0.7);color:#fff;transform:translateY(-1px)}
+  .mode-btn.active{
+    background:linear-gradient(135deg,#003F8C 0%,#f08300 100%);
+    color:#fff;border-color:rgba(240,131,0,.55);
+    box-shadow:0 4px 16px rgba(240,131,0,.4);
+  }
+
+  /* ── 3D stage ── */
+  #stage3d{position:absolute;inset:0;display:none;background:#05060a}
+  body.mode-3d main{grid-template-columns:1fr 320px}
+  body.mode-3d #stage>canvas#bg,
+  body.mode-3d #stage>canvas#fg{display:none}
+  body.mode-3d #stage{
+    background:radial-gradient(ellipse at 50% 60%, #0a1430, #05060a 70%);
+  }
+  body.mode-3d #stage3d{display:block}
+
+  /* ── 3D zoom controls (top right, under mode bar) ── */
+  #zoom-3d{
+    position:fixed;top:54px;right:14px;display:none;gap:6px;z-index:40;
+  }
+  body.mode-3d #zoom-3d{display:flex}
+  .zoom-btn{
+    width:42px;height:42px;
+    background:rgba(0,63,140,0.55);
+    border:1px solid rgba(255,255,255,0.22);
+    border-radius:10px;
+    color:#cfd9ec;font:600 16px inherit;
+    cursor:pointer;backdrop-filter:blur(8px);
+    display:inline-flex;align-items:center;justify-content:center;
+    transition:transform .12s ease, background .15s ease, color .15s ease;
+  }
+  .zoom-btn:hover{background:rgba(240,131,0,0.55);color:#fff;transform:translateY(-1px)}
+  .zoom-btn:active{transform:translateY(0)}
+
+  /* ── floating 3D control overlay ── */
+  #controls-3d{
+    position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+    display:none;gap:10px;z-index:40;
+  }
+  body.mode-3d #controls-3d{display:flex}
+  .ctl-btn{
+    padding:11px 20px;
+    background:rgba(0,63,140,0.45);
+    border:1px solid rgba(255,255,255,0.22);
+    border-radius:10px;
+    color:#cfd9ec;
+    font:600 12px/1 inherit;letter-spacing:.12em;text-transform:uppercase;
+    cursor:pointer;backdrop-filter:blur(8px);
+    transition:transform .12s ease, background .15s ease, color .15s ease, box-shadow .15s ease;
+  }
+  .ctl-btn:hover{background:rgba(240,131,0,0.6);color:#fff;transform:translateY(-1px);
+    box-shadow:0 6px 22px rgba(240,131,0,0.45)}
+  .ctl-btn.primary{
+    background:linear-gradient(135deg,#003F8C 0%,#f08300 100%);
+    color:#fff;border-color:rgba(240,131,0,.55);
+    box-shadow:0 4px 16px rgba(240,131,0,.35);
+  }
+  .ctl-btn.warn{border-color:rgba(255,107,138,.7);color:#ff9bb0}
+  .ctl-btn.warn:hover{background:rgba(255,107,138,0.4);color:#fff}
+
+  /* ── 3D HUD overlay (info panel) ── */
+  #hud-3d{
+    position:fixed;top:54px;left:14px;display:none;
+    padding:10px 14px;
+    background:rgba(0,63,140,0.32);
+    border:1px solid rgba(240,131,0,.45);
+    border-radius:12px;
+    font-size:11px;line-height:1.55;
+    backdrop-filter:blur(8px);
+    color:#dfe7ff;letter-spacing:.04em;
+    z-index:30;max-width:300px;
+  }
+  body.mode-3d #hud-3d{display:block}
+  #hud-3d b{color:#ffb15a}
+  #hud-3d .row{display:flex;justify-content:space-between;gap:18px;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<header>
+  <h1>UAV Disaster Evacuation Simulator</h1>
+  <span class="meta">M-006 / FIT2023 — 移動エージェント搭載 UAV による山間部避難支援</span>
+  <span class="meta" id="clock"></span>
+</header>
+<main>
+  <div id="stage">
+    <canvas id="bg"></canvas>
+    <canvas id="fg"></canvas>
+    <canvas id="stage3d"></canvas>
+  </div>
+  <aside>
+    <div class="panel">
+      <h2>Controls</h2>
+      <div class="controls">
+        <button class="primary" id="btnStart">Start</button>
+        <button id="btnPause">Pause</button>
+        <button class="warn" id="btnReset">Reset</button>
+        <button id="btnStep">Step</button>
+      </div>
+      <div class="slider-row" style="margin-top:8px">
+        <span>Speed</span>
+        <input type="range" id="speed" min="1" max="20" value="6">
+        <span id="speedVal">6×</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Mission Status</h2>
+      <div class="row"><span class="k">Phase</span><span class="v" id="phase">IDLE</span></div>
+      <div class="row"><span class="k">Tick</span><span class="v" id="tick">0</span></div>
+      <div class="row"><span class="k">Guidance attempts</span><span class="v" id="att">0 / 8</span></div>
+      <div class="row"><span class="k">Survivors remaining</span><span class="v" id="rem">0</span></div>
+      <div class="row"><span class="k">Rescued (to shelter)</span><span class="v" id="rsc">0</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Legend</h2>
+      <div class="legend">
+        <span class="swatch" style="border-color:var(--shelter);background:rgba(121,184,255,.15)"></span><span>避難所 (Shelter)</span>
+        <span class="swatch" style="border-color:var(--ink)"></span><span>巡回ポイント (Patrol Pt)</span>
+        <span class="swatch" style="border-color:var(--uav1);background:var(--uav1)"></span><span>UAV1 — 情報収集</span>
+        <span class="swatch" style="border-color:var(--uav2);background:var(--uav2)"></span><span>UAV2 — 避難誘導</span>
+        <span class="swatch" style="border-color:var(--danger);background:rgba(255,107,138,.2)"></span><span>被災者 (Survivors)</span>
+        <span class="swatch" style="border-color:var(--warn)"></span><span>誘導中の集団</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Point State <span class="pill">priority = α·d<sub>d</sub> + β·t + γ·d<sub>hc</sub></span></h2>
+      <div style="max-height:230px;overflow:auto">
+        <table id="ptable">
+          <thead><tr><th>Pt</th><th>Before</th><th>Now</th><th>Pri.</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Telemetry Log</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </aside>
+</main>
+<footer>Wireframe simulator — reproduces Table 1 (initial 349 survivors, 8 guidance trials).
+  Layout abstracted from 群馬県安中市山間部 model.</footer>
+
+<!-- mode toggle (2D map ↔ 3D wireframe) -->
+<div id="mode-bar">
+  <button class="mode-btn active" data-mode="2d">📐 2D MAP</button>
+  <button class="mode-btn" data-mode="3d">🆘 3D 救助</button>
+</div>
+
+<!-- 3D-mode HUD -->
+<div id="hud-3d">
+  <b>マルチドローン 災害避難支援</b><br>
+  <small>UAV1: 情報収集 / UAV2: 避難誘導</small>
+  <div style="margin-top:6px;border-top:1px dashed rgba(240,131,0,.35);padding-top:6px">
+    <div class="row"><span>Phase</span><b id="phase3d">IDLE</b></div>
+    <div class="row"><span>Trial</span><b id="att3d">0 / 8</b></div>
+    <div class="row"><span>Survivors</span><b id="rem3d">0</b></div>
+    <div class="row"><span>Rescued</span><b id="rsc3d">0</b></div>
+  </div>
+</div>
+
+<!-- 3D zoom controls -->
+<div id="zoom-3d">
+  <button class="zoom-btn" id="btnZoomIn"  title="拡大">🔍+</button>
+  <button class="zoom-btn" id="btnZoomOut" title="縮小">🔍−</button>
+  <button class="zoom-btn" id="btnZoomReset" title="リセット">⌖</button>
+</div>
+
+<!-- 3D mission controls (mirrors 2D buttons) -->
+<div id="controls-3d">
+  <button class="ctl-btn primary" id="btn3dStart">▶ START</button>
+  <button class="ctl-btn"         id="btn3dPause">⏸ PAUSE</button>
+  <button class="ctl-btn warn"    id="btn3dReset">⟲ RESET</button>
+  <button class="ctl-btn"         id="btn3dStep">▷ STEP</button>
+</div>
+
+<script>
+/* ───── M-006 simulator ─────
+   Two shelters + 20 patrol points. Two UAVs:
+     UAV1 collects info & maintains priority
+     UAV2 picks survivors at high-priority points and ferries them to nearest shelter
+   8-trial guidance cap (per the paper).                              */
+
+const cv  = document.getElementById('fg');
+const bg  = document.getElementById('bg');
+const ctx = cv.getContext('2d');
+const bgx = bg.getContext('2d');
+
+let W=0,H=0;
+function resize(){
+  const r = document.getElementById('stage').getBoundingClientRect();
+  W = r.width; H = r.height;
+  for (const c of [cv,bg]){ c.width = W*devicePixelRatio; c.height = H*devicePixelRatio;
+    c.getContext('2d').setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); }
+  drawBackground();
+}
+window.addEventListener('resize',resize);
+
+/* ── topology ── */
+// normalised coords (0..1) — generated to look like a mountainous valley network
+const NODES = [
+  {id:'A', name:'避難所 A', shelter:true, x:0.05, y:0.30},
+  {id:1,  x:0.13, y:0.18},
+  {id:2,  x:0.20, y:0.34},
+  {id:3,  x:0.16, y:0.52},
+  {id:4,  x:0.24, y:0.66},
+  {id:5,  x:0.27, y:0.22},
+  {id:6,  x:0.32, y:0.42},
+  {id:7,  x:0.34, y:0.78},
+  {id:8,  x:0.40, y:0.18},
+  {id:9,  x:0.42, y:0.34},
+  {id:10, x:0.45, y:0.58},
+  {id:11, x:0.48, y:0.78},
+  {id:12, x:0.54, y:0.22},
+  {id:13, x:0.56, y:0.46},
+  {id:14, x:0.60, y:0.66},
+  {id:15, x:0.66, y:0.30},
+  {id:16, x:0.70, y:0.50},
+  {id:17, x:0.72, y:0.74},
+  {id:18, x:0.80, y:0.20},
+  {id:19, x:0.83, y:0.42},
+  {id:20, x:0.85, y:0.62},
+  {id:'B', name:'避難所 B', shelter:true, x:0.95, y:0.50},
+];
+const idIndex = new Map(NODES.map((n,i)=>[n.id,i]));
+function N(id){ return NODES[idIndex.get(id)]; }
+
+// edges (road segments). Hand-drawn to form a connected valley network.
+const EDGES = [
+  ['A',1],['A',2],['A',3],
+  [1,2],[1,5],[2,5],[2,6],[3,2],[3,4],[3,6],
+  [4,7],[4,6],[5,8],[5,9],[6,9],[6,10],
+  [7,11],[7,10],[8,9],[8,12],[9,12],[9,13],
+  [10,11],[10,13],[10,14],[11,14],[12,13],[12,15],
+  [13,15],[13,16],[14,16],[14,17],[15,18],[15,19],
+  [16,19],[16,17],[17,20],[18,19],[19,20],
+  [18,'B'],[19,'B'],[20,'B'],
+];
+// build adjacency + edge length cache
+const adj = new Map();
+function eucl(a,b){ const dx=(a.x-b.x)*W, dy=(a.y-b.y)*H; return Math.hypot(dx,dy); }
+for (const n of NODES) adj.set(n.id, []);
+for (const [a,b] of EDGES){
+  adj.get(a).push(b); adj.get(b).push(a);
+}
+
+/* ── initial survivor counts (Table 1, "誘導前") ── */
+const INITIAL = {1:15,2:30,3:0,4:0,5:25,6:30,7:0,8:10,9:25,10:5,
+                 11:40,12:35,13:0,14:0,15:0,16:12,17:20,18:25,19:32,20:45};
+let pts = {};               // current survivors at each point
+let priority = {};          // current priority value
+const ALPHA=1.2, BETA=0.05, GAMMA=0.7;
+
+/* ── shortest-path util (Dijkstra over current graph) ── */
+function dijkstra(srcId){
+  const dist = new Map(NODES.map(n=>[n.id,Infinity]));
+  const prev = new Map();
+  dist.set(srcId,0);
+  const Q = new Set(NODES.map(n=>n.id));
+  while(Q.size){
+    let u=null,du=Infinity;
+    for (const id of Q){ const d=dist.get(id); if(d<du){du=d;u=id;} }
+    if(u===null) break;
+    Q.delete(u);
+    for (const v of adj.get(u)){
+      const w = eucl(N(u),N(v));
+      const alt = du + w;
+      if (alt < dist.get(v)){ dist.set(v,alt); prev.set(v,u); }
+    }
+  }
+  return {dist,prev};
+}
+function pathTo(prev,target){
+  const out=[target];
+  while(prev.has(out[0])) out.unshift(prev.get(out[0]));
+  return out;
+}
+function nearestShelter(fromId){
+  const a = dijkstra('A').dist.get(fromId);
+  const b = dijkstra('B').dist.get(fromId);
+  return a<=b ? 'A' : 'B';
+}
+
+/* ── UAV agents ── */
+class UAV {
+  constructor(label,colour,startId){
+    this.label=label; this.colour=colour;
+    this.atId=startId;
+    const n=N(startId);
+    this.x=n.x; this.y=n.y;
+    this.path=[]; this.targetIdx=0;
+    this.carry=0;          // UAV2: passengers being escorted
+    this.escortDest=null;  // shelter id when escorting
+    this.state='idle';
+    this.speed=0.00006;    // per ms in normalised (0..1) units
+  }
+  setPath(ids){ this.path = ids.slice(); this.targetIdx=1; }
+  step(dt){
+    if (this.path.length<2 || this.targetIdx>=this.path.length){
+      this.state='atNode'; return;
+    }
+    const tgt = N(this.path[this.targetIdx]);
+    const dx=tgt.x-this.x, dy=tgt.y-this.y;
+    const dist=Math.hypot(dx,dy);
+    const step=this.speed*dt;
+    if (step>=dist){
+      this.x=tgt.x; this.y=tgt.y;
+      this.atId=tgt.id;
+      this.targetIdx++;
+      if (this.targetIdx>=this.path.length){ this.state='arrived'; }
+      else this.state='moving';
+    } else {
+      this.x += dx/dist*step;
+      this.y += dy/dist*step;
+      this.state='moving';
+    }
+  }
+}
+let uav1, uav2;
+
+/* ── core simulation ── */
+let sim = null;
+function resetSim(){
+  pts = {...INITIAL};
+  priority = {};
+  uav1 = new UAV('UAV1', getCSS('--uav1'), 'A');
+  uav2 = new UAV('UAV2', getCSS('--uav2'), 'A');
+  recomputePriorities();
+  sim = {
+    running:false, t:0, tick:0,
+    attempts:0, MAX_ATT:8,
+    rescued:0,
+    uav1Plan:null, uav2Plan:null,
+    log:[],
+  };
+  // UAV1 begins a sweep through all points
+  uav1.setPath(planSweep('A'));
+  // UAV2 idles at A until first task assigned
+  uav2.setPath(['A']);
+  log('SYS','SIMULATION INITIALISED · 349 survivors across 14 occupied points');
+  refreshTable();
+  updateHUD();
+}
+
+function getCSS(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+// elevation/coastline proxy: y axis used as elevation, distance from B as "coast"
+function elevationProxy(id){ return 1 - N(id).y; }
+function coastDistance(id){ return Math.abs(N(id).x - N('B').x); }
+function travelTimeFromUAV2(id){
+  // Dijkstra distance from UAV2's current node
+  const {dist} = dijkstra(uav2.atId);
+  return dist.get(id) || 0;
+}
+function recomputePriorities(){
+  for (const n of NODES){
+    if (n.shelter){ priority[n.id]=0; continue; }
+    const survivors = pts[n.id]||0;
+    if (survivors<=0){ priority[n.id]=0; continue; }
+    const dd  = elevationProxy(n.id);          // distance from secondary disaster (proxy)
+    const t   = travelTimeFromUAV2(n.id)*0.01; // travel time
+    const dhc = elevationProxy(n.id)*coastDistance(n.id);
+    priority[n.id] = (ALPHA*dd + BETA*t + GAMMA*dhc) * Math.log(1+survivors);
+  }
+}
+
+// UAV1 sweep — visit every patrol point in a heuristic order from start node
+function planSweep(start){
+  const remaining = new Set(NODES.filter(n=>!n.shelter).map(n=>n.id));
+  let cur = start;
+  const order=[start];
+  while(remaining.size){
+    const {dist,prev} = dijkstra(cur);
+    let best=null,bd=Infinity;
+    for (const id of remaining){ if(dist.get(id)<bd){bd=dist.get(id);best=id;} }
+    const seg = pathTo(prev,best); seg.shift();
+    order.push(...seg);
+    cur=best;
+    remaining.delete(best);
+  }
+  // return home to A so cycle can repeat
+  const {prev} = dijkstra(cur);
+  const back = pathTo(prev,'A'); back.shift();
+  order.push(...back);
+  return order;
+}
+
+function pickHighestPriorityPoint(){
+  let best=null,bv=-Infinity;
+  for (const n of NODES){
+    if (n.shelter) continue;
+    if ((pts[n.id]||0)<=0) continue;
+    if (priority[n.id]>bv){ bv=priority[n.id]; best=n.id; }
+  }
+  return best;
+}
+
+function dispatchUAV2(){
+  if (sim.attempts>=sim.MAX_ATT){
+    log('SYS','GUIDANCE LIMIT REACHED — 8 trials exhausted','ev');
+    sim.running=false; document.getElementById('phase').textContent='COMPLETE';
+    return false;
+  }
+  const tgt = pickHighestPriorityPoint();
+  if (tgt===null){
+    log('SYS','ALL ACCESSIBLE SURVIVORS RESCUED','ev');
+    sim.running=false; document.getElementById('phase').textContent='COMPLETE';
+    return false;
+  }
+  const {prev} = dijkstra(uav2.atId);
+  const route = pathTo(prev,tgt);
+  uav2.setPath(route);
+  uav2.escortDest=null; uav2.carry=0;
+  sim.attempts++;
+  log('U2',`TRIAL ${sim.attempts}/8 → P${tgt}  (priority ${priority[tgt].toFixed(2)}, survivors ${pts[tgt]})`,'u2');
+  return true;
+}
+
+/* ── main loop ── */
+let lastT=0;
+function frame(now){
+  if (!lastT) lastT=now;
+  const dt = Math.min(60, now-lastT);
+  lastT=now;
+  if (sim && sim.running){
+    const speed = +document.getElementById('speed').value;
+    stepSim(dt*speed);
+  }
+  draw();
+  if (mode==='3d') update3D(now, dt);
+  requestAnimationFrame(frame);
+}
+function stepSim(dt){
+  sim.t += dt; sim.tick++;
+  // UAV1 motion + behaviour
+  uav1.step(dt);
+  if (uav1.state==='arrived' || (uav1.targetIdx>=uav1.path.length)){
+    // arrived at sweep end → loop again
+    uav1.setPath(planSweep(uav1.atId));
+    recomputePriorities(); refreshTable();
+    log('U1','sweep cycle restarted, priorities updated','u1');
+  } else if (uav1.state==='atNode' && uav1.targetIdx<uav1.path.length){
+    uav1.targetIdx++;
+  }
+  // when UAV1 reaches a patrol point, recompute priority for that vicinity
+  if (uav1.state==='moving' && uav1._lastNode!==uav1.path[uav1.targetIdx-1]){
+    uav1._lastNode = uav1.path[uav1.targetIdx-1];
+    if (uav1._lastNode && !N(uav1._lastNode).shelter){
+      recomputePriorities(); refreshTable();
+    }
+  }
+
+  // UAV2 logic
+  if (uav2.path.length<=1 || uav2.targetIdx>=uav2.path.length){
+    // idle → dispatch new mission if possible
+    if (uav2.state!=='dispatching'){
+      uav2.state='dispatching';
+      const ok = dispatchUAV2();
+      if(!ok) return;
+    }
+  } else {
+    uav2.step(dt);
+    if (uav2.state==='arrived'){
+      const here = uav2.atId;
+      if (uav2.escortDest===null){
+        // arrived at survivor point
+        const took = pts[here]||0;
+        if (took>0){
+          // Take a portion (simulate 8-trial limit producing ~1-2 left as in Table1)
+          const ratio = 0.92 + Math.random()*0.06;
+          const moved = Math.max(1, Math.floor(took*ratio));
+          uav2.carry = moved;
+          pts[here] = took - moved;
+          recomputePriorities(); refreshTable();
+          log('U2',`picked up ${moved} survivors at P${here} (${pts[here]} remain)`,'u2');
+        }
+        // route to nearest shelter
+        const dest = nearestShelter(here);
+        const {prev} = dijkstra(here);
+        const route = pathTo(prev,dest);
+        uav2.setPath(route);
+        uav2.escortDest = dest;
+      } else {
+        // arrived at shelter
+        sim.rescued += uav2.carry;
+        log('U2',`escorted ${uav2.carry} → 避難所 ${uav2.escortDest}  (total rescued ${sim.rescued})`,'u2');
+        uav2.carry=0; uav2.escortDest=null;
+        uav2.path=[uav2.atId]; uav2.targetIdx=1;
+        uav2.state='atNode';
+      }
+    }
+  }
+  updateHUD();
+}
+
+/* ── rendering ── */
+function drawBackground(){
+  bgx.clearRect(0,0,W,H);
+  // contour-style decorative isolines
+  bgx.strokeStyle='rgba(159,179,255,0.06)';
+  bgx.lineWidth=1;
+  for (let i=0;i<10;i++){
+    bgx.beginPath();
+    const cy=H*(0.2+i*0.07);
+    bgx.moveTo(0,cy);
+    for (let x=0;x<=W;x+=20){
+      const y=cy + Math.sin((x+i*30)*0.012)*16 + Math.cos(x*0.005+i)*10;
+      bgx.lineTo(x,y);
+    }
+    bgx.stroke();
+  }
+  // edges
+  bgx.strokeStyle='rgba(159,179,255,0.30)';
+  bgx.setLineDash([4,4]);
+  for (const [a,b] of EDGES){
+    const A=N(a), B=N(b);
+    bgx.beginPath();
+    bgx.moveTo(A.x*W,A.y*H);
+    bgx.lineTo(B.x*W,B.y*H);
+    bgx.stroke();
+  }
+  bgx.setLineDash([]);
+  // crosshair tick frame
+  bgx.strokeStyle='rgba(159,179,255,0.25)';
+  bgx.strokeRect(8,8,W-16,H-16);
+  bgx.fillStyle='rgba(159,179,255,0.6)';
+  bgx.font='10px ui-monospace,Menlo,monospace';
+  bgx.fillText('N ↑',16,22);
+  bgx.fillText('SCALE: 1 UNIT ≈ 200 m',W-180,H-14);
+}
+
+function drawNode(n){
+  const x=n.x*W, y=n.y*H;
+  if (n.shelter){
+    ctx.strokeStyle=getCSS('--shelter');
+    ctx.fillStyle='rgba(121,184,255,0.10)';
+    ctx.lineWidth=1.5;
+    ctx.beginPath();
+    ctx.moveTo(x-14,y-6); ctx.lineTo(x,y-16); ctx.lineTo(x+14,y-6);
+    ctx.lineTo(x+14,y+12); ctx.lineTo(x-14,y+12); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle=getCSS('--ink');
+    ctx.font='11px Inter,sans-serif';
+    ctx.fillText(n.name, x+18, y+4);
+  } else {
+    const surv = pts[n.id]||0;
+    const pri = priority[n.id]||0;
+    const sz = 10 + Math.min(14, Math.sqrt(surv)*1.6);
+    // priority halo
+    if (surv>0){
+      const a = Math.min(0.5, pri*0.25+0.08);
+      ctx.fillStyle=`rgba(255,107,138,${a})`;
+      ctx.beginPath(); ctx.arc(x,y, sz+8, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.strokeStyle=getCSS('--ink');
+    ctx.fillStyle='rgba(11,16,32,0.85)';
+    ctx.lineWidth=1;
+    ctx.fillRect(x-sz/2,y-sz/2,sz,sz);
+    ctx.strokeRect(x-sz/2,y-sz/2,sz,sz);
+    ctx.fillStyle=surv>0?getCSS('--danger'):getCSS('--ink-dim');
+    ctx.font='10px ui-monospace,monospace';
+    ctx.textAlign='center';
+    ctx.fillText('P'+n.id, x, y-sz/2-4);
+    ctx.fillStyle=surv>0?'#ffd6df':getCSS('--ink-dim');
+    ctx.fillText(surv, x, y+sz/2+11);
+    ctx.textAlign='left';
+  }
+}
+
+function drawUAV(u){
+  const x=u.x*W, y=u.y*H;
+  ctx.save();
+  ctx.translate(x,y);
+  // route preview
+  if (u.path && u.path.length>1){
+    ctx.strokeStyle=u.colour+'aa';
+    ctx.lineWidth=1.2;
+    ctx.setLineDash([3,3]);
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    for (let i=u.targetIdx;i<u.path.length;i++){
+      const p=N(u.path[i]);
+      ctx.lineTo(p.x*W-x, p.y*H-y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // body — wireframe quad-rotor
+  ctx.strokeStyle=u.colour;
+  ctx.fillStyle='rgba(11,16,32,0.85)';
+  ctx.lineWidth=1.4;
+  ctx.beginPath();
+  ctx.moveTo(-10,-10); ctx.lineTo(10,10);
+  ctx.moveTo(10,-10); ctx.lineTo(-10,10);
+  ctx.stroke();
+  for (const [dx,dy] of [[-10,-10],[10,-10],[10,10],[-10,10]]){
+    ctx.beginPath(); ctx.arc(dx,dy,4,0,Math.PI*2);
+    ctx.fill(); ctx.stroke();
+  }
+  // hub
+  ctx.beginPath(); ctx.arc(0,0,3,0,Math.PI*2); ctx.fillStyle=u.colour; ctx.fill();
+  // label + carry indicator
+  ctx.fillStyle=u.colour;
+  ctx.font='10px ui-monospace,monospace';
+  ctx.fillText(u.label,12,-8);
+  if (u.carry>0){
+    ctx.fillStyle=getCSS('--warn');
+    ctx.fillText('▲'+u.carry, 12, 6);
+  }
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // node draw order: shelters under points
+  for (const n of NODES) drawNode(n);
+  if (uav1) drawUAV(uav1);
+  if (uav2) drawUAV(uav2);
+}
+
+/* ── HUD/log ── */
+function refreshTable(){
+  const tb = document.querySelector('#ptable tbody');
+  if (!tb._built){
+    tb.innerHTML = '';
+    for (let i=1;i<=20;i++){
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>P${i}</td><td>${INITIAL[i]}</td><td class="now"></td><td class="pri"></td>`;
+      tb.appendChild(tr);
+    }
+    tb._built=true;
+  }
+  const rows = tb.querySelectorAll('tr');
+  for (let i=0;i<20;i++){
+    const id=i+1;
+    rows[i].querySelector('.now').textContent = pts[id];
+    rows[i].querySelector('.pri').textContent = (priority[id]||0).toFixed(2);
+    rows[i].querySelector('.now').style.color = pts[id]>0?'#ff9bb0':'var(--ink-dim)';
+  }
+}
+function updateHUD(){
+  document.getElementById('tick').textContent = sim.tick;
+  document.getElementById('att').textContent = `${sim.attempts} / ${sim.MAX_ATT}`;
+  let rem=0; for (let i=1;i<=20;i++) rem+=pts[i];
+  document.getElementById('rem').textContent = rem;
+  document.getElementById('rsc').textContent = sim.rescued;
+  const phase = !sim.running ? (sim.attempts>=sim.MAX_ATT?'COMPLETE':'PAUSED')
+    : (uav2.escortDest? 'ESCORTING':'PATROL+SEARCH');
+  document.getElementById('phase').textContent = phase;
+  // mirror to 3D HUD
+  const p3=document.getElementById('phase3d'); if(p3) p3.textContent=phase;
+  const a3=document.getElementById('att3d');   if(a3) a3.textContent=`${sim.attempts} / ${sim.MAX_ATT}`;
+  const r3=document.getElementById('rem3d');   if(r3) r3.textContent=rem;
+  const s3=document.getElementById('rsc3d');   if(s3) s3.textContent=sim.rescued;
+}
+function log(who,msg,cls){
+  const el=document.getElementById('log');
+  const d = new Date();
+  const ts = d.toTimeString().slice(0,8);
+  const line=document.createElement('div');
+  line.innerHTML=`<span class="t">[${ts}]</span> <span class="${cls||'ev'}">${who}</span> ${msg}`;
+  el.appendChild(line);
+  el.scrollTop=el.scrollHeight;
+}
+
+/* ── UI wiring ── */
+document.getElementById('btnStart').onclick=()=>{
+  if(!sim) resetSim();
+  sim.running=true; updateHUD();
+  log('SYS','START','ev');
+};
+document.getElementById('btnPause').onclick=()=>{
+  if(sim){ sim.running=false; updateHUD(); log('SYS','PAUSE','ev'); }
+};
+document.getElementById('btnReset').onclick=()=>{
+  document.getElementById('log').innerHTML='';
+  resetSim();
+};
+document.getElementById('btnStep').onclick=()=>{
+  if(!sim) resetSim();
+  stepSim(40);
+};
+document.getElementById('speed').oninput = e =>
+  document.getElementById('speedVal').textContent = e.target.value+'×';
+
+setInterval(()=>{
+  document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8);
+},1000);
+
+/* ─────────────────────────────────────────────────────────────
+   3D wireframe view (Three.js) — shares state with 2D simulator
+   ───────────────────────────────────────────────────────────── */
+let mode = '2d';
+let three = null;
+
+function terrainHeight(nx, ny){
+  // gentle mountain valley — 0..1 normalised → world height
+  const x=(nx-0.5)*8, z=(ny-0.5)*5;
+  return Math.sin(x*0.55)*0.55 + Math.cos(z*0.7)*0.45 + Math.sin((x+z)*0.4)*0.25;
+}
+function nodeWorld(n){
+  return new THREE.Vector3((n.x-0.5)*24, terrainHeight(n.x,n.y)+0.05, (n.y-0.5)*16);
+}
+
+function setup3D(){
+  if (three) return;
+  if (typeof THREE === 'undefined'){
+    console.error('THREE not loaded'); return;
+  }
+  const canvas = document.getElementById('stage3d');
+  const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+  renderer.setPixelRatio(devicePixelRatio);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x05060a);
+  scene.fog = new THREE.Fog(0x05060a, 22, 70);
+
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
+  camera.position.set(0, 18, 26);
+  camera.lookAt(0, 0, 0);
+
+  // ground grid
+  const grid = new THREE.GridHelper(40, 40, 0x224466, 0x102036);
+  grid.position.y = -0.01;
+  scene.add(grid);
+
+  // wireframe terrain
+  const tg = new THREE.PlaneGeometry(28, 18, 36, 24);
+  const tp = tg.attributes.position;
+  for (let i=0;i<tp.count;i++){
+    // PlaneGeometry is on XY before rotation — map to world XZ
+    const x = tp.getX(i), y = tp.getY(i);
+    const nx = x/28 + 0.5, ny = -y/18 + 0.5;
+    tp.setZ(i, terrainHeight(nx, ny));
+  }
+  tg.computeVertexNormals();
+  tg.rotateX(-Math.PI/2);
+  scene.add(new THREE.Mesh(tg, new THREE.MeshBasicMaterial({
+    color:0x3a4a82, wireframe:true, transparent:true, opacity:0.45
+  })));
+
+  // edges between patrol points (wireframe roads)
+  const ePts = [];
+  for (const [a,b] of EDGES){
+    const wa = nodeWorld(N(a)), wb = nodeWorld(N(b));
+    ePts.push(wa.x, wa.y+0.05, wa.z, wb.x, wb.y+0.05, wb.z);
+  }
+  const eg = new THREE.BufferGeometry();
+  eg.setAttribute('position', new THREE.Float32BufferAttribute(ePts, 3));
+  scene.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({
+    color:0x9fb3ff, transparent:true, opacity:0.55
+  })));
+
+  // node markers + survivor towers
+  const nodeMeshes = new Map();
+  const towers = new Map();
+  const labels = new Map();
+  for (const n of NODES){
+    const w = nodeWorld(n);
+    if (n.shelter){
+      const grp = new THREE.Group();
+      grp.position.copy(w);
+      // landing pad ring
+      const pad = new THREE.Mesh(
+        new THREE.RingGeometry(0.85, 1.05, 24),
+        new THREE.MeshBasicMaterial({color:0x79b8ff, wireframe:true,
+          side:THREE.DoubleSide, transparent:true, opacity:0.8})
+      );
+      pad.rotation.x = -Math.PI/2; pad.position.y = 0.02;
+      grp.add(pad);
+      // shelter hut (cone)
+      const hut = new THREE.Mesh(
+        new THREE.ConeGeometry(0.7, 1.1, 6),
+        new THREE.MeshBasicMaterial({color:0x79b8ff, wireframe:true})
+      );
+      hut.position.y = 0.55; grp.add(hut);
+      // base box
+      const base = new THREE.Mesh(
+        new THREE.BoxGeometry(1.2, 0.4, 1.2),
+        new THREE.MeshBasicMaterial({color:0x79b8ff, wireframe:true, transparent:true, opacity:0.6})
+      );
+      base.position.y = 0.2; grp.add(base);
+      scene.add(grp);
+    } else {
+      // patrol point base
+      const base = new THREE.Mesh(
+        new THREE.BoxGeometry(0.55, 0.18, 0.55),
+        new THREE.MeshBasicMaterial({color:0xdfe7ff, wireframe:true})
+      );
+      base.position.copy(w); base.position.y += 0.09;
+      scene.add(base);
+      nodeMeshes.set(n.id, base);
+      // survivor tower (height = count*scale)
+      const tower = new THREE.Mesh(
+        new THREE.BoxGeometry(0.4, 1, 0.4),
+        new THREE.MeshBasicMaterial({color:0xff6b8a, wireframe:true,
+          transparent:true, opacity:0.85})
+      );
+      tower.position.copy(w);
+      scene.add(tower);
+      towers.set(n.id, tower);
+      // label sprite
+      const lbl = makeLabelSprite('P'+n.id);
+      lbl.position.set(w.x, w.y+0.5, w.z);
+      scene.add(lbl);
+      labels.set(n.id, lbl);
+    }
+  }
+
+  // build wireframe quadcopters for both UAVs
+  function buildDrone(bodyColor){
+    const g = new THREE.Group();
+    const bodyMat = new THREE.MeshBasicMaterial({color:bodyColor, wireframe:true});
+    const armMat  = new THREE.MeshBasicMaterial({color:0xdfe7ff, wireframe:true});
+    const propMat = new THREE.MeshBasicMaterial({color:bodyColor, wireframe:true,
+      transparent:true, opacity:0.95});
+    const frontMat= new THREE.MeshBasicMaterial({color:0xff4d4d, wireframe:true});
+    // body
+    g.add(new THREE.Mesh(new THREE.BoxGeometry(0.5,0.22,0.5), bodyMat));
+    // X-frame arms
+    const arms = new THREE.Group();
+    for (let i=0;i<2;i++){
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.06, 0.06), armMat);
+      arm.rotation.y = i*Math.PI/2 + Math.PI/4;
+      arms.add(arm);
+    }
+    g.add(arms);
+    // propellers at 4 corners
+    const props = [];
+    for (let i=0;i<4;i++){
+      const a = i*Math.PI/2 + Math.PI/4;
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(0.18, 0.26, 16),
+        propMat
+      );
+      ring.rotation.x = -Math.PI/2;
+      ring.position.set(Math.cos(a)*0.62, 0.06, Math.sin(a)*0.62);
+      const blade = new THREE.Mesh(
+        new THREE.BoxGeometry(0.5, 0.02, 0.05),
+        propMat
+      );
+      blade.position.copy(ring.position);
+      blade.position.y += 0.005;
+      g.add(ring); g.add(blade);
+      props.push(blade);
+    }
+    // forward marker
+    const front = new THREE.Mesh(
+      new THREE.ConeGeometry(0.12, 0.3, 4),
+      frontMat
+    );
+    front.rotation.x = Math.PI/2;
+    front.position.set(0, 0, 0.42);
+    g.add(front);
+    // search beacon (rotating ring under drone)
+    const beacon = new THREE.Mesh(
+      new THREE.RingGeometry(0.5, 0.65, 24),
+      new THREE.MeshBasicMaterial({color:bodyColor, wireframe:true,
+        transparent:true, opacity:0.4, side:THREE.DoubleSide})
+    );
+    beacon.rotation.x = -Math.PI/2;
+    beacon.position.y = -0.2;
+    g.add(beacon);
+    return {root:g, props, beacon};
+  }
+  const dA = buildDrone(0x7cf2c2);   // UAV1 — green (info)
+  const dB = buildDrone(0xffd66b);   // UAV2 — yellow (rescue)
+  scene.add(dA.root); scene.add(dB.root);
+
+  // route trail (dynamic LineSegments) for UAV2 active mission
+  const trailMat = new THREE.LineBasicMaterial({color:0xffd66b, transparent:true, opacity:0.7});
+  const trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(60*3), 3));
+  const trail = new THREE.LineSegments(trailGeo, trailMat);
+  scene.add(trail);
+
+  // decorative star field
+  const starGeo = new THREE.BufferGeometry();
+  const stars = [];
+  for (let i=0;i<160;i++){
+    stars.push((Math.random()-0.5)*60, 4+Math.random()*22, (Math.random()-0.5)*60);
+  }
+  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(stars,3));
+  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({color:0x9fb3ff, size:0.06})));
+
+  three = {scene, camera, renderer, nodeMeshes, towers, labels, dA, dB, trail, trailGeo,
+           camAngle: 0.6, camZoom: 1.0,
+           camDistBase: 26, camHeightBase: 14,
+           ZOOM_MIN: 0.35, ZOOM_MAX: 2.4};
+  resize3D();
+  // mouse wheel zoom on the 3D canvas
+  canvas.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const factor = Math.exp(e.deltaY * 0.0012);
+    three.camZoom = Math.min(three.ZOOM_MAX, Math.max(three.ZOOM_MIN, three.camZoom * factor));
+  }, {passive:false});
+}
+
+function makeLabelSprite(text){
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(11,16,32,0.85)';
+  g.fillRect(0,0,c.width,c.height);
+  g.strokeStyle = '#9fb3ff'; g.lineWidth=2;
+  g.strokeRect(2,2,c.width-4,c.height-4);
+  g.font = 'bold 36px ui-monospace,monospace';
+  g.fillStyle = '#dfe7ff';
+  g.textAlign='center'; g.textBaseline='middle';
+  g.fillText(text, c.width/2, c.height/2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({map:tex, transparent:true, depthTest:false});
+  const sp = new THREE.Sprite(mat);
+  sp.scale.set(0.9, 0.45, 1);
+  return sp;
+}
+
+function resize3D(){
+  if (!three) return;
+  const r = document.getElementById('stage').getBoundingClientRect();
+  three.renderer.setSize(r.width, r.height, false);
+  three.camera.aspect = Math.max(0.001, r.width / r.height);
+  three.camera.updateProjectionMatrix();
+}
+
+function update3D(now, dt){
+  if (!three) return;
+  const {scene, camera, renderer, towers, dA, dB, trail, trailGeo} = three;
+
+  // gentle camera orbit (slowed down) + zoom
+  three.camAngle += 0.00003 * dt;
+  const r = three.camDistBase   * three.camZoom;
+  const h = three.camHeightBase * three.camZoom;
+  camera.position.set(Math.sin(three.camAngle)*r, h, Math.cos(three.camAngle)*r);
+  camera.lookAt(0, 1, 0);
+
+  // sync drones
+  function syncDrone(d, u, hover){
+    const wx=(u.x-0.5)*24, wz=(u.y-0.5)*16;
+    const wy = terrainHeight(u.x, u.y) + hover;
+    d.root.position.lerp(new THREE.Vector3(wx, wy, wz), 0.18);
+    // yaw toward next waypoint
+    if (u.path && u.path.length>1 && u.targetIdx<u.path.length){
+      const t2 = N(u.path[u.targetIdx]);
+      const tw = nodeWorld(t2);
+      const dx = tw.x - d.root.position.x;
+      const dz = tw.z - d.root.position.z;
+      if (dx*dx + dz*dz > 0.0001){
+        const target = Math.atan2(dx, dz);
+        // smooth yaw lerp
+        let cur = d.root.rotation.y;
+        let diff = ((target-cur+Math.PI*3)%(Math.PI*2)) - Math.PI;
+        d.root.rotation.y = cur + diff*0.12;
+      }
+    }
+    // propellers spin
+    for (const p of d.props) p.rotation.y += 0.6;
+    // beacon spin
+    d.beacon.rotation.z += 0.04;
+  }
+  if (uav1) syncDrone(dA, uav1, 1.6);
+  if (uav2) syncDrone(dB, uav2, 1.4);
+
+  // sync survivor towers
+  for (let id=1; id<=20; id++){
+    const t = towers.get(id);
+    if (!t) continue;
+    const surv = pts[id]||0;
+    const targetH = surv * 0.07;
+    t.scale.y = Math.max(0.001, targetH);
+    const base = nodeWorld(N(id)).y + 0.18;
+    t.position.y = base + targetH*0.5;
+    t.visible = surv > 0;
+    // pulse colour for currently-targeted point
+    if (uav2 && uav2.path && uav2.path[uav2.path.length-1]===id && uav2.escortDest===null){
+      const k = (Math.sin(now*0.006)+1)*0.5;
+      t.material.color.setRGB(1, 0.4+k*0.4, 0.5);
+    } else {
+      t.material.color.setHex(0xff6b8a);
+    }
+  }
+
+  // trail of UAV2's planned path
+  if (uav2 && uav2.path && uav2.path.length>1){
+    const segs = [];
+    let prev = new THREE.Vector3(
+      (uav2.x-0.5)*24,
+      terrainHeight(uav2.x, uav2.y)+1.4,
+      (uav2.y-0.5)*16
+    );
+    for (let i=uav2.targetIdx;i<uav2.path.length;i++){
+      const w = nodeWorld(N(uav2.path[i]));
+      const next = new THREE.Vector3(w.x, w.y+1.4, w.z);
+      segs.push(prev.x, prev.y, prev.z, next.x, next.y, next.z);
+      prev = next;
+    }
+    const arr = trailGeo.attributes.position.array;
+    for (let i=0;i<arr.length;i++) arr[i] = segs[i] !== undefined ? segs[i] : 0;
+    trailGeo.attributes.position.needsUpdate = true;
+    trailGeo.setDrawRange(0, Math.min(60, segs.length/3));
+    trail.visible = true;
+  } else {
+    trail.visible = false;
+  }
+
+  renderer.render(scene, camera);
+}
+
+/* ── mode switching + 3D control wiring ── */
+function setMode(m){
+  mode = m;
+  document.body.classList.toggle('mode-3d', m==='3d');
+  document.querySelectorAll('.mode-btn').forEach(b=>{
+    b.classList.toggle('active', b.dataset.mode===m);
+  });
+  if (m==='3d'){ setup3D(); resize3D(); }
+}
+document.querySelectorAll('.mode-btn').forEach(b=>{
+  b.addEventListener('click', ()=>setMode(b.dataset.mode));
+});
+window.addEventListener('resize', resize3D);
+
+// 3D control buttons → reuse existing handlers
+const proxy = (from, to)=>document.getElementById(from)
+  .addEventListener('click', ()=>document.getElementById(to).click());
+proxy('btn3dStart','btnStart');
+proxy('btn3dPause','btnPause');
+proxy('btn3dReset','btnReset');
+proxy('btn3dStep','btnStep');
+
+// zoom buttons
+function zoom3D(factor){
+  if (!three) return;
+  three.camZoom = Math.min(three.ZOOM_MAX,
+                  Math.max(three.ZOOM_MIN, three.camZoom * factor));
+}
+document.getElementById('btnZoomIn').addEventListener('click', ()=>zoom3D(0.82));
+document.getElementById('btnZoomOut').addEventListener('click', ()=>zoom3D(1.22));
+document.getElementById('btnZoomReset').addEventListener('click', ()=>{
+  if (three) three.camZoom = 1.0;
+});
+
+resize();
+resetSim();
+requestAnimationFrame(frame);
+</script>
+<!-- ── HIL bridge: map UAV1→UAV2 coordination to a REAL WiFi MANET message ── -->
+<script>
+(function(){
+  const BRIDGE = "http://localhost:8090";
+  let _seq = 0, _busy = false;
+  const badge = document.createElement('div');
+  badge.style.cssText = "position:fixed;right:10px;bottom:10px;z-index:9999;"
+    + "font:11px/1.5 ui-monospace,Menlo,monospace;background:#0b1020;border:1px solid #3a4a82;"
+    + "color:#7cf2c2;padding:7px 11px;border-radius:7px;max-width:320px;white-space:pre-wrap";
+  badge.textContent = "MANET HIL: idle (bridge :8090)";
+  (document.body||document.documentElement).appendChild(badge);
+
+  window.hilSend = function(from, to){
+    if (_busy) return;                         /* one real TX at a time */
+    const id = ++_seq; _busy = true;
+    badge.style.color = '#9fb3ff';
+    badge.textContent = `MANET HIL: UAV${from}→UAV${to} #${id} TX…`;
+    if (typeof log==='function') log('NET',`MANET TX UAV${from}→UAV${to} over real WiFi ad-hoc…`,'ev');
+    fetch(`${BRIDGE}/manet?from=${from}&to=${to}&id=${id}`).then(r=>r.json()).then(d=>{
+      _busy = false;
+      if (d.delivered){
+        badge.style.color='#7cf2c2';
+        badge.textContent = `MANET HIL: UAV${from}→UAV${to} OK  ${d.rtt_ms}ms  ${d.hops} hop (real)`;
+        if (typeof log==='function') log('NET',`MANET delivered UAV${from}→UAV${to}: ${d.rtt_ms}ms, ${d.hops} hop`,'u1');
+      } else {
+        badge.style.color='#ff6b8a';
+        badge.textContent = `MANET HIL: UAV${from}→UAV${to} LOST (no route/reply)`;
+        if (typeof log==='function') log('NET',`MANET LOST UAV${from}→UAV${to}`,'ev');
+      }
+    }).catch(_=>{ _busy=false; badge.style.color='#ffd66b'; badge.textContent='MANET HIL: bridge offline (run bridge.py)'; });
+  };
+
+  /* Wrap dispatchUAV2: each UAV2 dispatch is driven by UAV1's gathered info,
+     so it maps to a real coordination message UAV1→UAV2 over the WiFi MANET. */
+  if (typeof dispatchUAV2 === 'function'){
+    const _orig = dispatchUAV2;
+    window.dispatchUAV2 = function(){
+      const r = _orig.apply(this, arguments);
+      if (r) hilSend(1, 2);
+      return r;
+    };
+  }
+})();
+</script>
+</body>
+</html>
