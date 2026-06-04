@@ -1335,6 +1335,218 @@ requestAnimationFrame(frame);
 })();
 </script>
 
+<!-- ── Real terrain: 国土地理院 (GSI) 色別標高図タイル + DEM で実標高 ── -->
+<script>
+(function(){
+  // 群馬県・妙義山周辺の山間部 (z13 tile, 標高 420–1160m / 起伏 740m)
+  const TILE = { z:13, x:7252, y:3208 };
+  const base = 'https://cyberjapandata.gsi.go.jp/xyz';
+  const DEM_URL    = `${base}/dem/${TILE.z}/${TILE.x}/${TILE.y}.txt`;
+  const RELIEF_URL = `${base}/relief/${TILE.z}/${TILE.x}/${TILE.y}.png`;
+  const G = { on:false, ready:false, dem:null, dim:0, minE:0, maxE:1, img:null, area:'群馬県・妙義山周辺' };
+  window.GSI = G;
+
+  // 標高 (m) を正規化ステージ座標 (0..1) でサンプル
+  G.elevAt = function(nx,ny){
+    if (!G.dem || !G.dim) return 0;
+    const c = Math.max(0, Math.min(G.dim-1, Math.round(nx*(G.dim-1))));
+    const r = Math.max(0, Math.min(G.dim-1, Math.round(ny*(G.dim-1))));
+    return G.dem[r*G.dim + c];
+  };
+
+  // DEM グリッド (256×256 の標高 CSV) を取得
+  fetch(DEM_URL).then(r=>r.text()).then(txt=>{
+    const rows = txt.trim().split(/\r?\n/).map(l=>l.split(','));
+    const dim = rows.length; const dem = new Float32Array(dim*dim);
+    let mn=Infinity, mx=-Infinity;
+    for (let r=0;r<dim;r++){ const row=rows[r]; for (let c=0;c<dim;c++){
+      let v=parseFloat(row[c]); if(!isFinite(v)) v=(mn===Infinity?0:mn);
+      dem[r*dim+c]=v; if(v<mn)mn=v; if(v>mx)mx=v; } }
+    G.dem=dem; G.dim=dim; G.minE=mn; G.maxE=mx; G.ready=true;
+    if (typeof log==='function') log('GEO',`GSI DEM loaded: ${G.area} ${mn.toFixed(0)}–${mx.toFixed(0)}m`,'ev');
+    if (G.on && typeof recomputePriorities==='function'){ recomputePriorities(); if (typeof refreshTable==='function') refreshTable(); }
+  }).catch(()=>{ if (typeof log==='function') log('GEO','GSI DEM fetch failed (offline?)','ev'); });
+
+  // 色別標高図タイルを背景画像として取得 (CORS *)
+  const img = new Image(); img.crossOrigin='anonymous';
+  img.onload = ()=>{ G.img=img; if (G.on && typeof drawBackground==='function') drawBackground(); };
+  img.src = RELIEF_URL;
+
+  // 標高プロキシを実標高に差し替え (GSI ON 時): 正規化標高 = (elev-min)/(max-min)
+  const _elev = window.elevationProxy;
+  window.elevationProxy = function(id){
+    if (G.on && G.ready){ const n=N(id); return (G.elevAt(n.x,n.y)-G.minE)/Math.max(1,G.maxE-G.minE); }
+    return _elev(id);
+  };
+
+  // 背景描画をラップ: GSI ON 時は色別標高図タイル + 道路 + 注記を描く
+  const _bg = window.drawBackground;
+  window.drawBackground = function(){
+    if (!(G.on && G.img)) return _bg.apply(this, arguments);
+    bgx.clearRect(0,0,W,H);
+    bgx.globalAlpha=0.95; bgx.drawImage(G.img,0,0,W,H); bgx.globalAlpha=1;
+    bgx.fillStyle='rgba(11,16,32,0.30)'; bgx.fillRect(0,0,W,H);           // 暗くしてノード視認性確保
+    bgx.strokeStyle='rgba(255,255,255,0.5)'; bgx.setLineDash([4,4]);      // 道路グラフ
+    for (const [a,b] of EDGES){ const A=N(a),B=N(b);
+      bgx.beginPath(); bgx.moveTo(A.x*W,A.y*H); bgx.lineTo(B.x*W,B.y*H); bgx.stroke(); }
+    bgx.setLineDash([]);
+    bgx.strokeStyle='rgba(255,255,255,0.25)'; bgx.strokeRect(8,8,W-16,H-16);
+    bgx.fillStyle='rgba(255,255,255,0.9)'; bgx.font='10px ui-monospace,Menlo,monospace';
+    bgx.fillText('N ↑',16,22);
+    bgx.fillText(`地形: ${G.area} (国土地理院 色別標高図 / DEM ${G.minE.toFixed(0)}–${G.maxE.toFixed(0)}m)`, 16, H-14);
+  };
+
+  // トグルボタン (MANET/Routing の下に積む)
+  const el = document.createElement('button');
+  el.style.cssText='position:absolute;right:8px;top:64px;z-index:50;font:11px ui-monospace,monospace;'
+    +'background:#0b1020;color:#7c8bb8;border:1px solid #3a4a82;border-radius:6px;padding:4px 8px;cursor:pointer';
+  el.textContent='Terrain: abstract';
+  const stage=document.getElementById('stage'); if(stage) stage.appendChild(el);
+  el.onclick=()=>{ G.on=!G.on; el.textContent='Terrain: '+(G.on?'GSI':'abstract'); el.style.color=G.on?'#8fd6ff':'#7c8bb8';
+    if (typeof drawBackground==='function') drawBackground();
+    if (typeof recomputePriorities==='function'){ recomputePriorities(); if (typeof refreshTable==='function') refreshTable(); }
+  };
+})();
+</script>
+
+<!-- ── Scenario selector: 被災者分布の切替・編集 (Table1 / Empty / Random / Custom) ── -->
+<script>
+(function(){
+  window.SCENARIO = null;                    // null = Table 1 (既定の INITIAL を使う)
+  const NONSHELTER = NODES.filter(n=>!n.shelter).map(n=>n.id);
+  function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a);
+    t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+
+  // resetSim をラップ: 元の初期化後に SCENARIO を pts へ反映
+  const _reset = window.resetSim;
+  window.resetSim = function(){
+    _reset.apply(this, arguments);
+    if (window.SCENARIO){
+      pts = {}; for (const id of NONSHELTER) pts[id] = window.SCENARIO[id]||0;
+      if (typeof recomputePriorities==='function') recomputePriorities();
+      if (typeof refreshTable==='function') refreshTable();
+      if (typeof updateHUD==='function') updateHUD();
+    }
+  };
+
+  function buildScenario(kind, seed){
+    if (kind==='table1') return null;                       // 既定 INITIAL
+    if (kind==='empty'){ const o={}; for (const id of NONSHELTER) o[id]=0; return o; }
+    if (kind==='random'){ const rnd=mulberry32((seed|0)||42); const o={};
+      for (const id of NONSHELTER) o[id] = rnd()<0.6 ? Math.floor(5+rnd()*45) : 0; return o; }
+    return window.SCENARIO;                                  // custom は別途
+  }
+  function total(o){ return o? Object.values(o).reduce((a,b)=>a+(+b||0),0) : 349; }
+
+  function apply(kind){
+    let s;
+    if (kind==='custom'){
+      try { s = JSON.parse(document.getElementById('scnJson').value);
+        if (typeof s!=='object'||Array.isArray(s)) throw 0; }
+      catch(e){ if (typeof log==='function') log('SYS','Custom JSON 解析失敗 — {"1":15,"2":30,...} 形式で','ev'); return; }
+      const o={}; for (const id of NONSHELTER) o[id]=Math.max(0, Math.floor(+s[id]||0)); s=o;
+    } else {
+      s = buildScenario(kind, +document.getElementById('scnSeed').value);
+    }
+    window.SCENARIO = s;
+    if (typeof resetSim==='function') resetSim();
+    if (typeof log==='function') log('SYS',`シナリオ: ${kind} (被災者 ${total(s)}人) を適用`,'ev');
+  }
+
+  // パネルを Controls の直後に挿入
+  const ctrlPanel = document.querySelector('.panel');     // 先頭 = Controls
+  const p = document.createElement('div'); p.className='panel'; p.id='scnPanel';
+  p.innerHTML =
+    '<h2>Scenario</h2>'
+    + '<select id="scnSel" style="width:100%;background:#0b1020;color:#cfe;border:1px solid #3a4a82;border-radius:5px;padding:4px;font:12px ui-monospace,monospace">'
+    + '<option value="table1">Table 1 (誘導前 349人)</option>'
+    + '<option value="empty">All Empty (0人)</option>'
+    + '<option value="random">Random (seed)</option>'
+    + '<option value="custom">Custom (JSON)</option></select>'
+    + '<div id="scnSeedRow" style="display:none;margin-top:6px;font:11px ui-monospace,monospace;color:#9fb3ff">seed '
+    + '<input id="scnSeed" type="number" value="42" style="width:64px;background:#0b1020;color:#cfe;border:1px solid #3a4a82;border-radius:5px;padding:2px 4px"></div>'
+    + '<textarea id="scnJson" placeholder=\'{"1":15,"2":30,"5":25}\' style="display:none;width:100%;height:64px;margin-top:6px;'
+    + 'background:#0b1020;color:#cfe;border:1px solid #3a4a82;border-radius:5px;padding:4px;font:11px ui-monospace,monospace"></textarea>'
+    + '<button id="scnApply" style="margin-top:6px;width:100%;background:#13204a;color:#8fd6ff;border:1px solid #3a4a82;border-radius:5px;padding:5px;cursor:pointer;font:12px ui-monospace,monospace">Apply scenario</button>';
+  if (ctrlPanel && ctrlPanel.parentNode) ctrlPanel.after(p);
+
+  const sel=document.getElementById('scnSel');
+  sel.onchange=()=>{ const k=sel.value;
+    document.getElementById('scnSeedRow').style.display = k==='random'?'block':'none';
+    document.getElementById('scnJson').style.display    = k==='custom'?'block':'none'; };
+  document.getElementById('scnApply').onclick=()=>apply(sel.value);
+})();
+</script>
+
+<!-- ── Rescue-target attributes: 要介護/子供/成人 構成 + 優先度重み ── -->
+<script>
+(function(){
+  // 各点の被災者構成 (要介護 care / 子供 child / 成人 adult=残り) を点ごとに決定論的に生成。
+  // vulnerable (要介護・子供) が多い点ほど優先度を引き上げる。
+  const ATTR = { enabled:true, wCare:1.5, wChild:0.8, comp:{} };
+  window.ATTR = ATTR;
+  function comp(id){
+    if (ATTR.comp[id]) return ATTR.comp[id];
+    let a=(id*2654435761)>>>0; const rnd=()=>{ a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a);
+      t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; };
+    let care=0.10+rnd()*0.35, child=0.10+rnd()*0.30;
+    if (care+child>0.9){ const s=0.9/(care+child); care*=s; child*=s; }
+    return (ATTR.comp[id]={ care, child, adult:1-care-child });
+  }
+  window.attrComp = comp;
+
+  // recomputePriorities をラップ: 計算後に vulnerability 重みを乗じる
+  const _recomp = window.recomputePriorities;
+  window.recomputePriorities = function(){
+    _recomp.apply(this, arguments);
+    if (!ATTR.enabled) return;
+    for (const n of NODES){ if (n.shelter) continue;
+      const c=comp(n.id); priority[n.id] *= (1 + ATTR.wCare*c.care + ATTR.wChild*c.child); }
+  };
+
+  // 地図上の被災者ノードに脆弱層バッジ (要介護=◆ 子供=▲) を重畳
+  const _draw = window.draw;
+  window.draw = function(){
+    _draw.apply(this, arguments);
+    if (!ATTR.enabled || typeof ctx==='undefined') return;
+    for (const n of NODES){ if (n.shelter || (pts[n.id]||0)<=0) continue;
+      const c=comp(n.id), x=n.x*W, y=n.y*H;
+      ctx.save(); ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+      let s=''; if (c.care>0.25) s+='◆'; if (c.child>0.22) s+='▲';
+      if (s){ ctx.fillStyle='#ffd66b'; ctx.fillText(s, x, y-16); }
+      ctx.restore(); }
+  };
+
+  function agg(k){ let v=0; for (const n of NODES){ if(n.shelter) continue;
+    v += (pts[n.id]||0)*comp(n.id)[k]; } return Math.round(v); }
+  function readout(){ const el=document.getElementById('attrAgg'); if(!el) return;
+    el.textContent = `要介護 ${agg('care')} · 子供 ${agg('child')} · 成人 ${agg('adult')} 人`; }
+  window._attrReadout = readout;
+
+  // パネルを Scenario の後 (あれば) / Controls の後に挿入
+  const anchor = document.getElementById('scnPanel') || document.querySelector('.panel');
+  const p=document.createElement('div'); p.className='panel'; p.id='attrPanel';
+  const slider=(id,val)=>`<input id="${id}" type="range" min="0" max="3" step="0.1" value="${val}" style="width:100%">`;
+  p.innerHTML =
+    '<h2>Rescue Priority (属性重み)</h2>'
+    + '<label style="font:11px ui-monospace,monospace;color:#cfe;display:flex;align-items:center;gap:6px">'
+    + '<input id="attrEn" type="checkbox" checked> 脆弱層を優先する</label>'
+    + '<div style="font:11px ui-monospace,monospace;color:#9fb3ff;margin-top:6px">要介護 重み <span id="attrCareV">1.5</span>'+slider('attrCare','1.5')+'</div>'
+    + '<div style="font:11px ui-monospace,monospace;color:#9fb3ff">子供 重み <span id="attrChildV">0.8</span>'+slider('attrChild','0.8')+'</div>'
+    + '<div id="attrAgg" style="font:11px ui-monospace,monospace;color:#8fd6ff;margin-top:6px">—</div>';
+  if (anchor && anchor.parentNode) anchor.after(p);
+
+  function refresh(){ if (typeof recomputePriorities==='function') recomputePriorities();
+    if (typeof refreshTable==='function') refreshTable(); readout(); }
+  document.getElementById('attrEn').onchange=e=>{ ATTR.enabled=e.target.checked; refresh(); };
+  const cS=document.getElementById('attrCare'), chS=document.getElementById('attrChild');
+  cS.oninput =e=>{ ATTR.wCare=+e.target.value; document.getElementById('attrCareV').textContent=(+e.target.value).toFixed(1); refresh(); };
+  chS.oninput=e=>{ ATTR.wChild=+e.target.value; document.getElementById('attrChildV').textContent=(+e.target.value).toFixed(1); refresh(); };
+  // 初期反映 (sim 起動後に集計を埋める)
+  setTimeout(refresh, 600);
+})();
+</script>
+
 <!-- ── HIL bridge: map UAV1→UAV2 coordination to a REAL WiFi MANET message ── -->
 <script>
 (function(){
