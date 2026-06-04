@@ -1154,7 +1154,8 @@ requestAnimationFrame(frame);
   const mbtn = mkBtn('Routing: ZRP', 36, '#ffd66b');
   mbtn.onclick = ()=>{ mode = (mode==='ZRP'?'AODV':'ZRP'); mbtn.textContent='Routing: '+mode;
     mbtn.style.color = mode==='ZRP'?'#ffd66b':'#9fb3ff';
-    for (const k in cache) delete cache[k]; for (const k in custody) delete custody[k]; };
+    for (const k in cache) delete cache[k]; for (const k in custody) delete custody[k];
+    sends=0; dels=0; rreqId=0; qSaved=0; buffered=0; delivered=0; drops=0; };
 
   function nodes(){
     const a = [];
@@ -1214,6 +1215,7 @@ requestAnimationFrame(frame);
   const ripples = [];          // RREQ flood / bordercast animations: {id,t0,kind}
   const flashes = [];          // custody-delivery flashes: {id,t0}
   let rreqId = 0, drops = 0, queries = 0, qSaved = 0, buffered = 0, delivered = 0;
+  let sends = 0, dels = 0;            // live delivery-rate sampling (every 60 ticks)
   const byId   = ns => { const m={}; for (const n of ns) m[n.id]=n; return m; };
   const linkSet= (L,ns) => { const s=new Set();
     for (const [a,b] of L){ s.add(ns[a].id+'|'+ns[b].id); s.add(ns[b].id+'|'+ns[a].id); } return s; };
@@ -1324,11 +1326,18 @@ requestAnimationFrame(frame);
       const rad=(age/24)*16, a=0.7*(1-age/24), [cx,cy]=px(src);
       ctx.save(); ctx.strokeStyle=`rgba(124,242,194,${a})`; ctx.lineWidth=2.5;
       ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2); ctx.stroke(); ctx.restore(); }
+    // ---- live delivery-rate sampling: every 60 ticks, each UAV "sends" to GS;
+    //      delivered if it currently has a route (ZRP: route or already custody-cleared) ----
+    if (tick % 60 === 0){
+      for (const src of ['UAV1','UAV2']){ if(!m[src]) continue; sends++;
+        if (cache[src] && cache[src].path) dels++; }
+    }
+    const drate = sends ? (100*dels/sends).toFixed(0) : '—';
     // status line
     const label = mode==='ZRP'
-      ? `ZRP ρ=${RHO}  ${status} IERP:${rreqId} flood-saved:${qSaved} custody:${buffered}/deliv:${delivered}`
-      : `AODV  ${status} RREQ:${rreqId} drop:${drops}`;
-    ctx.save(); ctx.fillStyle='rgba(11,16,32,0.72)'; ctx.fillRect(8,H-30, mode==='ZRP'?470:360,20);
+      ? `ZRP ρ=${RHO}  ${status} deliv:${drate}%  IERP:${rreqId} flood-saved:${qSaved} custody:${buffered}/deliv:${delivered}`
+      : `AODV  ${status} deliv:${drate}%  RREQ:${rreqId} drop:${drops}`;
+    ctx.save(); ctx.fillStyle='rgba(11,16,32,0.72)'; ctx.fillRect(8,H-30, mode==='ZRP'?540:430,20);
     ctx.fillStyle = mode==='ZRP'?'#ffd66b':'#7cf2c2'; ctx.font='11px ui-monospace,monospace';
     ctx.fillText(label, 14, H-16); ctx.restore();
   };
