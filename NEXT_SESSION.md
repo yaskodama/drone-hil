@@ -17,6 +17,21 @@ HIL（Hardware-in-the-Loop）共シミュレーション。
   `RREQ#n UAV1→GS … RREP: 2 hop [UAV1·R1·GS]` / `link broke → …` /
   `route lost — partitioned` を出力。ステータス行 `AODV … RREQ:n drop:m`。
 
+- **hybrid_ZRP（進化版・既定）**：GA 進化パイプライン
+  (`~/ocaml-app/abclcp-project/aice-pi-evolution/experiments/2026-06-04_manet_drone_evolution/`)
+  が全 8 プロトコル族中で最バランスと判定した設計を実装。右上 `Routing: ZRP/AODV`
+  トグルで AODV ベースラインと比較可能。ZRP = **ゾーン内 proactive (IARP)** ＋
+  **ゾーン間 reactive bordercast (IERP)** のハイブリッド：
+  - 半径 ρ=1 のゾーンを金色の点線リンク＋周辺ノードリングで可視化。
+  - GS がゾーン内なら **0 query の proactive ルート**（金線、`intra-zone`）。
+  - ゾーン外なら **bordercast**（周辺ノードのみへ scoped query、金リング小、
+    `IERP#n … bordercast(4 peri vs 6 flood)`）＝AODV 全フラッディング(白リング大)
+    より制御トラフィック削減。ステータス行に `flood-saved:n`。
+  - **ETX リンク指標**（近い＝高品質＝低コスト、ホップ数でなく信頼性で経路選択）。
+  - **custody_transfer バッファ**：partition 時はメッセージを保持（`custody held`）、
+    再接続で配送（緑バースト＋`custody delivered`）。drop でなく delivered に。
+  - 検証: `/tmp/_ppt/_zrp.mjs`（mock canvas で 5/5 assertion green）。
+
 実装は **元 sim を非改変**で `window.draw` をラップする追記 `<script>`
 （`index.html` 末尾、コメント `MANET communication layer` のブロック）。
 MANET スクリプト単体は `node --check` 構文 OK。

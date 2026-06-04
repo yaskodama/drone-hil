@@ -1135,16 +1135,26 @@ requestAnimationFrame(frame);
 (function(){
   const R = 0.30;                       // comm range (normalised units)
   const RELAYS = [ {id:'R1',x:0.30,y:0.40}, {id:'R2',x:0.52,y:0.58}, {id:'R3',x:0.74,y:0.42} ];
+  const RHO = 1;                        // ZRP zone radius in hops: ≤RHO = proactive intra-zone, beyond = reactive bordercast
   let tick = 0;
   let manetOn = true;
+  let mode = 'ZRP';                     // 'ZRP' (evolved champion: zone routing + ETX + custody) | 'AODV' (baseline)
 
-  // toggle button (top-right of the stage)
-  const btn = document.createElement('button');
-  btn.textContent = 'MANET: ON';
-  btn.style.cssText = 'position:absolute;right:8px;top:8px;z-index:50;font:11px ui-monospace,monospace;'
-    + 'background:#0b1020;color:#7cf2c2;border:1px solid #3a4a82;border-radius:6px;padding:4px 8px;cursor:pointer';
+  const mkBtn = (label, top, col) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = `position:absolute;right:8px;top:${top}px;z-index:50;font:11px ui-monospace,monospace;`
+      + `background:#0b1020;color:${col};border:1px solid #3a4a82;border-radius:6px;padding:4px 8px;cursor:pointer`;
+    const stage = document.getElementById('stage'); if (stage) stage.appendChild(b);
+    return b;
+  };
+  // toggle buttons (top-right of the stage)
+  const btn = mkBtn('MANET: ON', 8, '#7cf2c2');
   btn.onclick = ()=>{ manetOn=!manetOn; btn.textContent='MANET: '+(manetOn?'ON':'off'); btn.style.color=manetOn?'#7cf2c2':'#7c8bb8'; };
-  const stage = document.getElementById('stage'); if (stage) stage.appendChild(btn);
+  const mbtn = mkBtn('Routing: ZRP', 36, '#ffd66b');
+  mbtn.onclick = ()=>{ mode = (mode==='ZRP'?'AODV':'ZRP'); mbtn.textContent='Routing: '+mode;
+    mbtn.style.color = mode==='ZRP'?'#ffd66b':'#9fb3ff';
+    for (const k in cache) delete cache[k]; for (const k in custody) delete custody[k]; };
 
   function nodes(){
     const a = [];
@@ -1172,10 +1182,38 @@ requestAnimationFrame(frame);
   }
   function px(n){ return [n.x*W, n.y*H]; }
 
-  // ---- reactive AODV state (mirrors the real Pi4/Pi3 AODV) ----
-  const cache = {};            // src -> { path:[ids]|null }  (route cache entry)
-  const ripples = [];          // RREQ flood animations: {x,y,t0}
-  let rreqId = 0, drops = 0;
+  // ---- ETX link metric: closer link = higher quality = lower transmission cost ----
+  function etx(p,q){ const qy = Math.max(0.08, 1 - dist(p,q)/R); return 1/qy; }   // expected transmissions
+  function adjOf(ns,L){ const a=ns.map(()=>[]); for(const[i,j]of L){a[i].push(j);a[j].push(i);} return a; }
+  // ETX-weighted shortest path (Dijkstra) — prefers reliable links over raw hop count
+  function routeETX(ns,L,from,to){
+    const idx={}; ns.forEach((n,i)=>idx[n.id]=i); const s=idx[from], t=idx[to];
+    if(s==null||t==null) return null;
+    const adj=adjOf(ns,L), D=ns.map(()=>Infinity), P=ns.map(()=>-1), done=ns.map(()=>false);
+    D[s]=0;
+    for(let it=0; it<ns.length; it++){ let u=-1,bd=Infinity;
+      for(let k=0;k<ns.length;k++) if(!done[k]&&D[k]<bd){bd=D[k];u=k;}
+      if(u<0) break; done[u]=true;
+      for(const v of adj[u]){ const w=etx(ns[u],ns[v]); if(D[u]+w<D[v]){D[v]=D[u]+w;P[v]=u;} } }
+    if(D[t]===Infinity) return null;
+    const path=[]; for(let u=t;u!==-1;u=P[u]) path.unshift(u); return {path, cost:D[t]};
+  }
+  // ZRP zone of src within RHO hops: {hop:idx->h, inZone:Set, peripheral:Set}
+  function zoneInfo(ns,L,srcIdx){
+    const adj=adjOf(ns,L), hop=ns.map(()=>Infinity); hop[srcIdx]=0; const q=[srcIdx];
+    while(q.length){ const u=q.shift(); if(hop[u]>=RHO) continue;
+      for(const v of adj[u]) if(hop[v]===Infinity){hop[v]=hop[u]+1;q.push(v);} }
+    const inZone=new Set(), peri=new Set();
+    hop.forEach((h,i)=>{ if(h<Infinity&&h<=RHO) inZone.add(i); if(h===RHO) peri.add(i); });
+    return {hop, inZone, peripheral:peri};
+  }
+
+  // ---- routing state (AODV baseline + ZRP evolved champion share the cache) ----
+  const cache = {};            // src -> { path:[ids]|null, kind:'intra'|'inter'|'aodv' }
+  const custody = {};          // src -> {held:bool}  (custody_transfer: hold buffered msg until a route returns)
+  const ripples = [];          // RREQ flood / bordercast animations: {id,t0,kind}
+  const flashes = [];          // custody-delivery flashes: {id,t0}
+  let rreqId = 0, drops = 0, queries = 0, qSaved = 0, buffered = 0, delivered = 0;
   const byId   = ns => { const m={}; for (const n of ns) m[n.id]=n; return m; };
   const linkSet= (L,ns) => { const s=new Set();
     for (const [a,b] of L){ s.add(ns[a].id+'|'+ns[b].id); s.add(ns[b].id+'|'+ns[a].id); } return s; };
@@ -1204,49 +1242,95 @@ requestAnimationFrame(frame);
       ctx.save(); ctx.fillStyle=n.col; ctx.strokeStyle='#0b1020'; ctx.lineWidth=1.5;
       ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2); ctx.fill(); ctx.stroke();
       ctx.fillStyle=n.col; ctx.font='9px ui-monospace,monospace'; ctx.fillText(n.id,x+7,y-6); ctx.restore(); }
-    // ---- reactive routing: cache lookup -> RREQ discovery -> repair on break ----
+    // ---- routing: ZRP (zone routing + ETX + custody) or AODV baseline ----
     let status='';
     for (const src of ['UAV1','UAV2']){
       if (!m[src]) continue;
+      const sIdx = ns.findIndex(n=>n.id===src);
       const col = src==='UAV1'?getCSS('--uav1'):getCSS('--uav2');
+
+      // ZRP: visualise the proactively-maintained intra-zone (IARP) + peripheral nodes
+      if (mode==='ZRP' && sIdx>=0){
+        const z = zoneInfo(ns, L, sIdx);
+        ctx.save(); ctx.strokeStyle='rgba(255,214,107,0.55)'; ctx.lineWidth=2.2; ctx.setLineDash([3,4]);
+        for (const [a,b] of L){ if ((a===sIdx&&z.inZone.has(b))||(b===sIdx&&z.inZone.has(a))){
+          const [ax,ay]=px(ns[a]),[bx,by]=px(ns[b]); ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke(); } }
+        ctx.setLineDash([]); ctx.restore();
+        ctx.save(); ctx.strokeStyle='rgba(255,214,107,0.85)'; ctx.lineWidth=1.5;       // peripheral (bordercast targets)
+        for (const pi of z.peripheral){ const [x,y]=px(ns[pi]); ctx.beginPath(); ctx.arc(x,y,8,0,Math.PI*2); ctx.stroke(); }
+        ctx.restore();
+      }
+
       let c = cache[src];
-      if (!c || !pathValid(c.path, ls, m)){     // no/stale route -> discover on demand
+      if (!c || !pathValid(c.path, ls, m)){     // no/stale route -> discover
         const broke = c && c.path;              // had a route that just went stale
-        const rt = route(ns, L, src, 'GS');     // RREQ flood result (BFS)
-        if (rt && rt.length>1){
-          const ids = rt.map(i=>ns[i].id);
-          cache[src] = { path: ids }; rreqId++;
-          ripples.push({ id:src, t0:tick });    // RREQ broadcast wavefront from src
-          ev(`${broke?'link broke → ':''}RREQ#${rreqId} ${src}→GS … RREP: ${ids.length-1} hop [${ids.join('·')}]`,
-             src==='UAV1'?'u1':'u2');
-        } else {
-          cache[src] = { path: null };
-          if (broke){ drops++; ev(`${src}→GS route lost — partitioned, buffering`, 'ev'); }
+        if (mode==='ZRP'){
+          const z = zoneInfo(ns, L, sIdx), gsIdx = ns.findIndex(n=>n.id==='GS');
+          const intra = gsIdx>=0 && z.inZone.has(gsIdx);
+          const rt = routeETX(ns, L, src, 'GS');           // ETX-weighted path
+          if (rt){
+            const ids = rt.path.map(i=>ns[i].id);
+            if (intra){                                     // proactive intra-zone: NO query (flood saved)
+              qSaved += ns.length;
+              cache[src] = { path: ids, kind:'intra', cost:rt.cost };
+              ev(`${src}→GS intra-zone (proactive, 0 query) ${ids.length-1}h ETX${rt.cost.toFixed(1)} [${ids.join('·')}]`, src==='UAV1'?'u1':'u2');
+            } else {                                        // inter-zone: bordercast to peripheral nodes only
+              rreqId++; const bc=Math.max(1,z.peripheral.size), flood=ns.length; qSaved += Math.max(0,flood-bc);
+              cache[src] = { path: ids, kind:'inter', cost:rt.cost };
+              ripples.push({ id:src, t0:tick, kind:'border' });
+              ev(`${broke?'link broke → ':''}IERP#${rreqId} ${src}→GS bordercast(${bc} peri vs ${flood} flood) ${ids.length-1}h ETX${rt.cost.toFixed(1)} [${ids.join('·')}]`, src==='UAV1'?'u1':'u2');
+            }
+            if (custody[src] && custody[src].held){          // custody_transfer: deliver buffered msg on reconnect
+              delivered++; flashes.push({id:src,t0:tick}); custody[src].held=false;
+              ev(`${src}→GS custody delivered — buffered message forwarded on reconnect`, 'u1'); }
+          } else {
+            cache[src] = { path:null, kind:'inter' };
+            if (broke){ buffered++; drops++; custody[src]={held:true};
+              ev(`${src}→GS partitioned — custody held (buffered:${buffered})`, 'ev'); }
+          }
+        } else {                                            // ---- AODV baseline: BFS flood ----
+          const rt = route(ns, L, src, 'GS');
+          if (rt && rt.length>1){
+            const ids = rt.map(i=>ns[i].id); cache[src]={path:ids, kind:'aodv'}; rreqId++;
+            ripples.push({ id:src, t0:tick, kind:'flood' });
+            ev(`${broke?'link broke → ':''}RREQ#${rreqId} ${src}→GS flood → RREP ${ids.length-1}h [${ids.join('·')}]`, src==='UAV1'?'u1':'u2');
+          } else { cache[src]={path:null, kind:'aodv'}; if (broke){ drops++; ev(`${src}→GS route lost — partitioned, drop`, 'ev'); } }
         }
       }
       c = cache[src];
       if (c.path){                              // draw the cached route + animated packet
         const pts = c.path.map(id=>px(m[id]));
-        ctx.save(); ctx.strokeStyle=col; ctx.lineWidth=2.4; ctx.setLineDash([8,6]);
+        const rcol = c.kind==='intra' ? '#ffd66b' : col;
+        ctx.save(); ctx.strokeStyle=rcol; ctx.lineWidth=2.4; ctx.setLineDash([8,6]);
         ctx.lineDashOffset = -(tick*0.6); ctx.beginPath();
         pts.forEach(([x,y],k)=> k?ctx.lineTo(x,y):ctx.moveTo(x,y)); ctx.stroke(); ctx.setLineDash([]);
         const hops=pts.length-1, seg=(tick*0.01)%hops, k=Math.floor(seg), f=seg-k;
         const [x0,y0]=pts[k], [x1,y1]=pts[Math.min(hops,k+1)];
         ctx.fillStyle='#ffffff'; ctx.beginPath(); ctx.arc(x0+(x1-x0)*f,y0+(y1-y0)*f,3,0,Math.PI*2); ctx.fill();
         ctx.restore();
-        status += `${src}→GS:${hops}h  `;
-      } else status += `${src}→GS:✕  `;
+        status += `${src}→GS:${hops}h${c.kind==='intra'?'·zone':''}  `;
+      } else status += `${src}→GS:⊗buf  `;
     }
-    // ---- RREQ flood wavefronts (expanding rings from the requester, fade ~40 ticks) ----
+    // ---- discovery wavefronts: white = AODV flood, gold = ZRP bordercast (scoped) ----
     for (let i=ripples.length-1;i>=0;i--){ const r=ripples[i], age=tick-r.t0, src=m[r.id];
       if (age>40 || !src){ ripples.splice(i,1); continue; }
-      const rad=(age/40)*R*W*1.15, a=0.45*(1-age/40), [cx,cy]=px(src);
-      ctx.save(); ctx.strokeStyle=`rgba(255,255,255,${a})`; ctx.lineWidth=1.5;
+      const border = r.kind==='border';
+      const rad=(age/40)*R*W*(border?0.85:1.15), a=(border?0.40:0.45)*(1-age/40), [cx,cy]=px(src);
+      ctx.save(); ctx.strokeStyle = border?`rgba(255,214,107,${a})`:`rgba(255,255,255,${a})`; ctx.lineWidth=1.5;
       ctx.beginPath(); ctx.ellipse(cx,cy,rad,rad*(H/W),0,0,Math.PI*2); ctx.stroke(); ctx.restore(); }
-    // status line (reactive AODV: live hop count + discovery/drop counters)
-    ctx.save(); ctx.fillStyle='rgba(11,16,32,0.7)'; ctx.fillRect(8,H-30,360,20);
-    ctx.fillStyle='#7cf2c2'; ctx.font='11px ui-monospace,monospace';
-    ctx.fillText(`AODV  ${status} RREQ:${rreqId} drop:${drops}`, 14, H-16); ctx.restore();
+    // ---- custody-delivery flashes (green burst at src when a buffered msg goes through) ----
+    for (let i=flashes.length-1;i>=0;i--){ const fl=flashes[i], age=tick-fl.t0, src=m[fl.id];
+      if (age>24 || !src){ flashes.splice(i,1); continue; }
+      const rad=(age/24)*16, a=0.7*(1-age/24), [cx,cy]=px(src);
+      ctx.save(); ctx.strokeStyle=`rgba(124,242,194,${a})`; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2); ctx.stroke(); ctx.restore(); }
+    // status line
+    const label = mode==='ZRP'
+      ? `ZRP ρ=${RHO}  ${status} IERP:${rreqId} flood-saved:${qSaved} custody:${buffered}/deliv:${delivered}`
+      : `AODV  ${status} RREQ:${rreqId} drop:${drops}`;
+    ctx.save(); ctx.fillStyle='rgba(11,16,32,0.72)'; ctx.fillRect(8,H-30, mode==='ZRP'?470:360,20);
+    ctx.fillStyle = mode==='ZRP'?'#ffd66b':'#7cf2c2'; ctx.font='11px ui-monospace,monospace';
+    ctx.fillText(label, 14, H-16); ctx.restore();
   };
 })();
 </script>
