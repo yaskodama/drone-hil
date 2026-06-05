@@ -193,6 +193,10 @@
           <option value="reset">⟲ リセット</option>
         </select>
       </div>
+      <div class="controls" style="margin-top:8px">
+        <button id="btnAiplCode">⟨/⟩ AIPL コード（Xinu別）</button>
+        <button id="btnOtherSim">↗ ブラウザAIPLシム</button>
+      </div>
     </div>
 
     <div class="panel">
@@ -1618,6 +1622,23 @@ requestAnimationFrame(frame);
 })();
 </script>
 
+<!-- AIPL per-drone code viewer (modal) -->
+<div id="aiplModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(5,8,16,0.86)">
+  <div style="max-width:920px;margin:36px auto;background:#0d1430;border:1px solid #2a3a6a;border-radius:10px;padding:16px;max-height:86vh;display:flex;flex-direction:column">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0;font-size:15px;color:#8fd6ff">実行した AIPL プログラム（ドローン / Xinu 別）</h2>
+      <button id="aiplClose" style="background:#13204a;color:#8fd6ff;border:1px solid #3a4a82;border-radius:6px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">✕ 閉じる</button>
+    </div>
+    <div id="aiplMode" style="color:#9fb3ff;font-size:11px;margin:6px 0"></div>
+    <div id="aiplTabs" style="display:flex;gap:6px;margin-bottom:8px">
+      <button class="aiplTab" data-d="UAV1" style="background:#13204a;color:#7cf2c2;border:1px solid #3a4a82;border-radius:6px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">UAV1 (Xinu1) 情報収集</button>
+      <button class="aiplTab" data-d="UAV2" style="background:#13204a;color:#ffd66b;border:1px solid #3a4a82;border-radius:6px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">UAV2 (Xinu2) 避難誘導</button>
+      <button class="aiplTab" data-d="GS" style="background:#13204a;color:#9fb3ff;border:1px solid #3a4a82;border-radius:6px;padding:5px 10px;cursor:pointer;font:12px ui-monospace">GroundStation 統括</button>
+    </div>
+    <pre id="aiplCode" style="flex:1;overflow:auto;background:#0a0f1e;border:1px solid #2a3a6a;border-radius:8px;padding:12px;margin:0;font:12px/1.5 ui-monospace,Menlo,monospace;color:#cfe;white-space:pre"></pre>
+  </div>
+</div>
+
 <!-- ── AIPL mission engine: run the M-006 mission as AIPL actors (browser runtime), driving the existing 2D + 3D views ── -->
 <script src="abcl/parser/parser.js"></script>
 <script type="module">
@@ -1713,10 +1734,13 @@ var uav1 = new UAV1();  var uav2 = new UAV2();  var gs = new GS();
 `;
 }
 
+window.aiplBuild = buildSRC;          // expose so the code viewer can regenerate per-drone source
 window.aiplStart = function(ps, px, py, paper){
   killT(); _track = true;
   parser.yy = AST;
-  const ast = parser.parse(buildSRC(ps, px, py, paper));
+  const src = buildSRC(ps, px, py, paper);
+  window._aiplSRC = src; window._aiplMode = paper;     // remember the program that was run
+  const ast = parser.parse(src);
   const interp = new Interpreter(line => {
     if (line && line.indexOf('[') !== 0 && typeof window.log === 'function') window.log('AIPL', line, 'u2');
   });
@@ -1766,6 +1790,50 @@ window.aiplStop = function(){ _track = false; killT(); window.aiplActive = false
   }
   // backup sync on a steady timer (independent of rAF) so pts always tracks the AIPL actors
   setInterval(() => { if (window.aiplActive && window.aiplSync) window.aiplSync(); }, 30);
+
+  // ── per-drone AIPL code viewer ──
+  function classBlock(src, name){                 // extract `class <name> { ... }` by brace matching
+    const i = src.indexOf('class ' + name);
+    if (i < 0) return '(not found)';
+    let b = src.indexOf('{', i), depth = 0, j = b;
+    for (; j < src.length; j++){ if (src[j]==='{') depth++; else if (src[j]==='}'){ depth--; if (depth===0){ j++; break; } } }
+    return src.slice(i, j);
+  }
+  function topLevel(src){                          // the `var uav1 = new ... ` instantiation lines
+    const m = src.match(/var uav1 = new[\s\S]*$/);
+    return m ? m[0].trim() : '';
+  }
+  function currentSource(){
+    if (window._aiplSRC) return { src: window._aiplSRC, paper: window._aiplMode };
+    // none run yet → generate for current scenario + default (paper) mode
+    const a = arrays();
+    return { src: window.aiplBuild ? window.aiplBuild(a.ps, a.px, a.py, true) : '', paper: true };
+  }
+  let viewDrone = 'UAV1';
+  function renderCode(){
+    const { src, paper } = currentSource();
+    const ran = !!window._aiplSRC;
+    document.getElementById('aiplMode').textContent =
+      'モード: ' + (paper ? '論文準拠（地理優先度 α·dd+β·t+γ·dhc, P8-P10未誘導, 残置）' : '簡約（人数重み, 1試行1点全救助）')
+      + ' ／ ' + (ran ? 'このシミュレーションで実行した実コード' : '未実行のためカレント設定で生成');
+    let code;
+    if (viewDrone === 'UAV1') code = '// === Xinu1 搭載: 情報収集ドローン (被災状況 init は表1の数値が焼き込まれている) ===\n' + classBlock(src,'UAV1');
+    else if (viewDrone === 'UAV2') code = '// === Xinu2 搭載: 避難誘導ドローン ===\n' + classBlock(src,'UAV2');
+    else code = '// === Ground Station: 統括 (UAV1 を scan → UAV2 へ dispatch) ===\n' + classBlock(src,'GS') + '\n\n// --- 起動 (アクター生成) ---\n' + topLevel(src);
+    document.getElementById('aiplCode').textContent = code;
+    document.querySelectorAll('.aiplTab').forEach(b=>{ b.style.outline = b.dataset.d===viewDrone ? '2px solid #8fd6ff' : 'none'; });
+  }
+  const modal = document.getElementById('aiplModal');
+  const codeBtn = document.getElementById('btnAiplCode');
+  if (codeBtn) codeBtn.onclick = () => { viewDrone='UAV1'; renderCode(); modal.style.display='block'; };
+  const closeBtn = document.getElementById('aiplClose');
+  if (closeBtn) closeBtn.onclick = () => { modal.style.display='none'; };
+  if (modal) modal.onclick = (e) => { if (e.target===modal) modal.style.display='none'; };
+  document.querySelectorAll('.aiplTab').forEach(b => b.onclick = () => { viewDrone=b.dataset.d; renderCode(); });
+
+  // ── pointer to the other (browser-AIPL) simulator ──
+  const otherBtn = document.getElementById('btnOtherSim');
+  if (otherBtn) otherBtn.onclick = () => window.open('http://localhost:8011/drone_mission.html', '_blank');
 })();
 </script>
 </body>
