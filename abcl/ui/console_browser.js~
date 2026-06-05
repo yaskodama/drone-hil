@@ -1,0 +1,8 @@
+import * as AST from "../ast.js";
+// parser は browser_console.html で先に script 読み込み済み
+
+window.addEventListener("DOMContentLoaded", () => {
+  const parser = window.parser;
+  parser.yy = AST;
+  console.log("parser =", parser);
+});

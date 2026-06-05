@@ -184,6 +184,15 @@
         <input type="range" id="speed" min="1" max="20" value="6">
         <span id="speedVal">6×</span>
       </div>
+      <div style="margin-top:8px">
+        <select id="missionSel" style="width:100%;background:#0b1020;color:#8fd6ff;border:1px solid #3a4a82;border-radius:6px;padding:5px;font:12px ui-monospace,monospace">
+          <option value="">— AIPL ミッション (2D/3D) —</option>
+          <option value="run_paper">▶ 実行（論文準拠）</option>
+          <option value="run_simple">▶ 実行（簡約）</option>
+          <option value="stop">⏸ ストップ</option>
+          <option value="reset">⟲ リセット</option>
+        </select>
+      </div>
     </div>
 
     <div class="panel">
@@ -257,6 +266,13 @@
   <button class="ctl-btn"         id="btn3dPause">⏸ PAUSE</button>
   <button class="ctl-btn warn"    id="btn3dReset">⟲ RESET</button>
   <button class="ctl-btn"         id="btn3dStep">▷ STEP</button>
+  <select id="missionSel3d" style="background:#0b1020;color:#8fd6ff;border:1px solid #3a4a82;border-radius:6px;padding:4px;font:11px ui-monospace,monospace">
+    <option value="">— AIPL ミッション —</option>
+    <option value="run_paper">▶ 実行（論文準拠）</option>
+    <option value="run_simple">▶ 実行（簡約）</option>
+    <option value="stop">⏸ ストップ</option>
+    <option value="reset">⟲ リセット</option>
+  </select>
 </div>
 
 <script>
@@ -507,10 +523,11 @@ function frame(now){
   if (!lastT) lastT=now;
   const dt = Math.min(60, now-lastT);
   lastT=now;
-  if (sim && sim.running){
+  if (sim && sim.running && !window.aiplActive){
     const speed = +document.getElementById('speed').value;
     stepSim(dt*speed);
   }
+  if (window.aiplActive && window.aiplSync) window.aiplSync();   // AIPL actors drive pts/uav2
   draw();
   if (mode==='3d') update3D(now, dt);
   requestAnimationFrame(frame);
@@ -1598,6 +1615,157 @@ requestAnimationFrame(frame);
       return r;
     };
   }
+})();
+</script>
+
+<!-- ── AIPL mission engine: run the M-006 mission as AIPL actors (browser runtime), driving the existing 2D + 3D views ── -->
+<script src="abcl/parser/parser.js"></script>
+<script type="module">
+import * as AST from "./abcl/ast.js";
+import { Interpreter } from "./abcl/interpreter.js";
+
+// track the AIPL scheduler's setTimeout ids so the mission can be stopped cleanly
+let _timers = []; let _track = false;
+const _st = window.setTimeout.bind(window);
+window.setTimeout = (fn, ms, ...r) => { const id = _st(fn, ms, ...r); if (_track) _timers.push(id); return id; };
+function killT(){ for (const id of _timers) clearTimeout(id); _timers = []; }
+
+// generate the mission source (paper-conformant or simplified) for the given survivors/coords
+function buildSRC(ps, px, py, paper){
+  let a = '';
+  for (let i=0;i<20;i++) a += `ps[${i}]=${ps[i]|0}; px[${i}]=${(+px[i]).toFixed(3)}; py[${i}]=${(+py[i]).toFixed(3)}; `;
+  const excl = paper ? 'if (i == 7) { reply(0.0 - 1.0); } if (i == 8) { reply(0.0 - 1.0); } if (i == 9) { reply(0.0 - 1.0); }' : '';
+  const prioExpr = paper ? 'base' : 'base * sqrt(1.0 + ps[i])';
+  const leaveCalc = paper ? 'lv = floor(s * 0.05 + 0.5); if (lv > 2) { lv = 2; }' : '';
+  const MAXN = paper ? 20 : 8;
+  return `
+class UAV1 {
+  var ps[20] = 0;  var px[20] = 0.0;  var py[20] = 0.0;  var served[20] = 0;
+  var xb = 0.95;  var refx = 0.05;  var refy = 0.30;
+  method init() { ${a} }
+  method prio(i) {
+    if (ps[i] <= 0) { reply(0.0 - 1.0); }
+    if (served[i] == 1) { reply(0.0 - 1.0); }
+    ${excl}
+    var dd = 1.0 - py[i];
+    var ex = refx - px[i];  var ey = refy - py[i];
+    var t = sqrt(ex*ex + ey*ey) * 0.01;
+    var ax = px[i] - xb;  if (ax < 0.0) { ax = 0.0 - ax; }
+    var base = 1.2*dd + 0.05*t + 0.7*(dd*ax);
+    reply(${prioExpr});
+  }
+  method surv(i) { reply(ps[i]); }
+  method px_at(i) { reply(px[i]); }
+  method py_at(i) { reply(py[i]); }
+  method set_resid(i, v) { ps[i] = v; served[i] = 1; }
+  method set_ref(x, y) { refx = x; refy = y; }
+}
+class UAV2 {
+  var rescued = 0;  var trips = 0;
+  method dispatch(pid, moved, resid) {
+    rescued = rescued + moved;  trips = trips + 1;
+    print("UAV2: P" + pid + " で " + moved + " 名を誘導 (残置 " + resid + ", 累計 " + rescued + ")");
+    reply(moved);
+  }
+}
+class GS {
+  var phase = 0;  var scanIdx = 0;  var best = 0;  var bv = 0.0;
+  var trial = 0;  var total = 0;  var curT = 0;
+  var tx = 0.0;  var ty = 0.0;  var u2x = 0.05;  var u2y = 0.30;  var MAX = ${MAXN};
+  method init() { best = 0 - 1;  bv = 0.0 - 1000.0;  send self.step(); }
+  method step() {
+    if (phase == 0) {
+      if (scanIdx < 20) {
+        var p = now uav1.prio(scanIdx);
+        if (p > bv) { bv = p; best = scanIdx; }
+        scanIdx = scanIdx + 1;  call wait(30);  send self.step();
+      } else {
+        if (bv < 0.0) { phase = 3; print("=== 誘導完了。累計救助 " + total + " 名 ==="); }
+        else { curT = best + 1; tx = now uav1.px_at(best); ty = now uav1.py_at(best); phase = 1; call wait(30); send self.step(); }
+      }
+    } else {
+      if (phase == 1) {
+        u2x = u2x + (tx - u2x) * 0.18;  u2y = u2y + (ty - u2y) * 0.18;
+        var dx = tx - u2x;  var dy = ty - u2y;
+        if (sqrt(dx*dx + dy*dy) < 0.012) {
+          u2x = tx;  u2y = ty;
+          var s = now uav1.surv(best);
+          var lv = 0;
+          ${leaveCalc}
+          var moved = s - lv;
+          var z = now uav2.dispatch(curT, moved, lv);
+          send uav1.set_resid(best, lv);  send uav1.set_ref(tx, ty);
+          total = total + moved;  trial = trial + 1;
+          print("GS: 誘導 " + trial + " → P" + curT + " 救助 " + moved + " 残置 " + lv + " 累計 " + total);
+          phase = 2;  call wait(300);  send self.step();
+        } else { call wait(26); send self.step(); }
+      } else {
+        if (phase == 2) {
+          scanIdx = 0;  best = 0 - 1;  bv = 0.0 - 1000.0;
+          if (trial >= MAX) { phase = 3; print("=== 完了: 累計救助 " + total + " 名 ==="); }
+          else { phase = 0; call wait(30); send self.step(); }
+        }
+      }
+    }
+  }
+}
+var uav1 = new UAV1();  var uav2 = new UAV2();  var gs = new GS();
+`;
+}
+
+window.aiplStart = function(ps, px, py, paper){
+  killT(); _track = true;
+  parser.yy = AST;
+  const ast = parser.parse(buildSRC(ps, px, py, paper));
+  const interp = new Interpreter(line => {
+    if (line && line.indexOf('[') !== 0 && typeof window.log === 'function') window.log('AIPL', line, 'u2');
+  });
+  interp.runProgram(ast);
+  window._aiplI = interp; window.aiplActive = true;
+};
+window.aiplStop = function(){ _track = false; killT(); window.aiplActive = false; };
+</script>
+
+<!-- glue: AIPL actor state → drone-hil shared globals (pts / uav2 / sim) so 2D draw() and 3D update3D() render it -->
+<script>
+(function(){
+  function arrays(){ const ps=[],px=[],py=[];
+    for (let i=1;i<=20;i++){ const n=N(i); ps.push(pts[i]||0); px.push(n.x); py.push(n.y); } return {ps,px,py}; }
+  window.aiplSync = function(){
+    const I = window._aiplI; if (!I) return;
+    const u1 = I.runtime.actors.get('uav1'), g = I.runtime.actors.get('gs');
+    if (!u1 || !g) return;
+    const a = u1.state.ps, st = g.state;
+    for (let i=0;i<20;i++) pts[i+1] = a[i];
+    if (uav2){ uav2.x = st.u2x; uav2.y = st.u2y; }
+    const ui = st.phase===0 ? Math.min(19, st.scanIdx) : (st.best>=0 ? st.best : 0);
+    if (uav1){ uav1.x = u1.state.px[ui]; uav1.y = u1.state.py[ui]; }
+    sim.rescued = st.total; sim.attempts = st.trial;
+    if (typeof refreshTable === 'function') refreshTable();
+    if (typeof updateHUD === 'function') updateHUD();
+    // override the HUD bits that updateHUD writes from native-sim assumptions
+    const ph = ['UAV1 探索','UAV2 誘導','次の対象','AIPL 完了'][st.phase] || 'AIPL';
+    const att = 'AIPL 誘導 ' + st.trial;
+    for (const [eid,val] of [['phase',ph],['phase3d',ph],['att',att],['att3d',att]]){
+      const el = document.getElementById(eid); if (el) el.textContent = val;
+    }
+  };
+  function act(v){
+    if (v==='run_paper' || v==='run_simple'){
+      if (!sim) resetSim();
+      sim.running = false;
+      const A = arrays();
+      window.aiplStart(A.ps, A.px, A.py, v==='run_paper');
+      log('SYS','AIPL ミッション開始 ('+(v==='run_paper'?'論文準拠':'簡約')+') — 2D/3D 共通','ev');
+    } else if (v==='stop'){ if (window.aiplStop) window.aiplStop(); log('SYS','AIPL ミッション停止','ev'); }
+    else if (v==='reset'){ if (window.aiplStop) window.aiplStop(); resetSim(); log('SYS','AIPL ミッション リセット','ev'); }
+  }
+  for (const id of ['missionSel','missionSel3d']){
+    const s = document.getElementById(id);
+    if (s) s.onchange = () => { const v=s.value; s.value=''; const o=document.getElementById(id==='missionSel'?'missionSel3d':'missionSel'); if(o)o.value=''; act(v); };
+  }
+  // backup sync on a steady timer (independent of rAF) so pts always tracks the AIPL actors
+  setInterval(() => { if (window.aiplActive && window.aiplSync) window.aiplSync(); }, 30);
 })();
 </script>
 </body>
