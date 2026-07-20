@@ -1,0 +1,146 @@
+\documentclass[11pt]{ltjsarticle}
+\usepackage[margin=25mm]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!45!black}\itshape,
+  stringstyle=\color{red!60!black},
+  numbers=left,numberstyle=\tiny\color{gray},
+  frame=single,framesep=4pt,rulecolor=\color{gray!40},
+  breaklines=true,showstringspaces=false,
+  morekeywords={class,method,function,var,while,do,if,else,return,send,new,nil,self,suicide,int,print}
+}
+
+\title{\textbf{ベアメタル Xinu 上の型推論クリーン AIPL・哲学者の食事}\\
+\large 単一クラス化による occurs check 回避、50回食事ベンチ、GC 実行}
+\author{drone-hil / xinu-rpi4 $\times$ AIPL (aipl2c)}
+\date{2026年6月5日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+先の分散 N-Queens に続き、古典的な\textbf{哲学者の食事}問題を\textbf{型推論クリーン}な AIPL で記述し、
+Raspberry Pi~4 のベアメタル Embedded Xinu の JIT ランタイムで実行した。本問題は AIPL の Hindley--Milner 型
+推論にとって N-Queens より難しい：フォークと哲学者を素朴に2クラスに分けると \texttt{parent}/参照が相互再帰し、
+\textbf{occurs check} が無限型を作って型付けに失敗する。N-Queens で有効だった「単一自己再帰クラス」の手法を踏襲し、
+フォーク・哲学者・テーブルを\textbf{単一クラス \texttt{D}}（実行時 \texttt{kind})に畳み、さらに actor 参照を渡す
+メソッド引数とローカル変数を\textbf{クラス名 \texttt{: D} で nominal 固定}することで、型推論クリーン（\texttt{aipl2c
+-{}-check} を通過）にできた。設計上\textbf{デッドロックフリー（順序付き獲得）＋ライブロックフリー（待ち行列フォーク）}
+で、実機で\textbf{全哲学者が厳密に同数の食事（餓死なし・完全公平）}を達成した。50回食事を計測し、N-Queens のように
+suicide せず常駐する 11 個のアクターを\textbf{GC で回収}した（約 220--306\,ms、対象 11 個）。
+\end{abstract}
+
+\section{型推論の壁と、その回避}
+2クラス（\texttt{Fork} と \texttt{Philosopher}）で素直に書くと、\texttt{Philosopher.lo\_fork:\,Fork} かつ
+\texttt{Fork.waiter:\,Philosopher} という\emph{相互再帰}になり、HM の単一化が
+$\alpha = \{\dots : \alpha \dots\}$ を要求して \textbf{occurs check failed} となる
+（フィールドや \texttt{: any} 注釈では回避できなかった）。N-Queens の \texttt{Node} が通ったのは\emph{単一クラスの
+自己再帰}（\texttt{Node}$\to$\texttt{Node}）だったからである。そこで:
+\begin{enumerate}
+  \item \textbf{単一クラス \texttt{D}}：フォーク役・哲学者役・テーブル役を1クラスに畳む。全参照が
+  \texttt{D}$\to$\texttt{D} の自己再帰になる。
+  \item \textbf{\texttt{: D} の nominal 注釈}：actor を受け取るメソッド引数（\texttt{request(phil: D)},
+  \texttt{init\_b(lf: D, hf: D)}）と \texttt{setup} のローカル変数（\texttt{var f0: D = new D();} 等）を
+  クラス名で明示注釈し、推論が構造型へ展開して occurs check に落ちるのを防ぐ。
+\end{enumerate}
+これで \texttt{aipl2c -{}-check} を型エラーなしで通過する（型推論クリーン）。
+
+\begin{lstlisting}[caption={\texttt{dining\_xinu.abcl} の中核（待ち行列フォーク＋順序付き獲得）。}]
+method request(phil: D) {                    // フォーク役: 空なら即許可、塞がっていれば待たせる
+  if (held == 0) { held = 1; send phil.granted(idx); }
+  else { has_waiter = 1; waiter = phil; }
+}
+method release(unused) {                      // 解放時、待ち哲学者へ直接フォークを手渡す
+  held = 0;
+  if (has_waiter == 1) { has_waiter = 0; held = 1; send waiter.granted(idx); }
+}
+method granted(forkIdx: int) {                // 哲学者役: 低->高の順で取得し、両方揃ったら食事
+  if (forkIdx == lo_idx) { send hi_fork.request(self); }
+  else {
+    send lo_fork.release(0);  send hi_fork.release(0);
+    meals = meals + 1;
+    if (meals < quota) { send self.dine(); }  // quota まで自己駆動で食べ続ける
+  }
+}
+\end{lstlisting}
+
+\section{正しさ：デッドロック\&ライブロックフリー}
+\textbf{順序付き獲得}：各哲学者は必ず低 index のフォークを先に取る（哲学者4のフォークは $\{4,0\}$ なので
+$lo{=}0,\,hi{=}4$ と逆順になり循環待ちを断つ）$\Rightarrow$ デッドロックなし。
+\textbf{待ち行列フォーク}：塞がっているフォークへの要求は1つだけ待たせ（5環では各フォークの競合相手は高々1人）、
+解放時に手渡す。ビジーリトライ無し $\Rightarrow$ ライブロックなし。
+実機の結果（表\ref{tab:din}）では\textbf{全哲学者が厳密に \texttt{quota} 回ずつ}食事しており（$25{=}5{\times}5$,
+$50{=}10{\times}5$, $100{=}20{\times}5$）、\textbf{餓死ゼロ・完全公平}が確認できる。
+
+\section{手法と JIT ランタイムの特性}
+コンパイルは N-Queens と同じく \texttt{aipl2c -{}-xinu-jit}（型検査は \texttt{-{}-check} で別途、クリーン）、
+生成 C の \texttt{v\_nil} を \texttt{v\_int(0)} に1箇所置換、\texttt{POST /actor/load} で Pi-4 JIT へ。
+\textbf{重要な特性}：JIT のメッセージポンプは1回の \texttt{/actor/load} で\emph{有限予算}を消化して quiesce する。
+N-Queens は\emph{有限木}なので1回の load で全て drain したが、哲学者の食事は\emph{持続ループ}なので、
+各哲学者が \texttt{quota} に達するまで \texttt{dine} を HTTP ゲートウェイ越しに\textbf{再ポーク}して駆動する。
+したがって計測 wall-clock は\textbf{HTTP 再ポークのラウンドトリップが支配的}で、生の食事計算時間ではない点に注意。
+
+\section{結果}
+\begin{table}[h]\centering
+\caption{実機・哲学者の食事（Pi~4 Xinu JIT、HTTP 駆動）と GC。}
+\label{tab:din}
+\begin{tabular}{rrl rrr rr}
+\toprule
+総食数 & quota & 各哲学者 & 合計 & wall-clock & pokes & ms/食 & GC \\
+       &       & (5人)   &     & (ms) &  &  & (ms) \\
+\midrule
+25  & 5  & $5,5,5,5,5$        & 25  & 10659 & 20 & 426 & 227 \\
+50  & 10 & $10,10,10,10,10$   & 50  & 23385 & 45 & 468 & 220 \\
+100 & 20 & $20,20,20,20,20$   & 100 & 46094 & 95 & 461 & 306 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}
+\begin{axis}[width=12cm,height=5.5cm,xlabel={総食数},ylabel={wall-clock (ms)},
+  grid=both,grid style={gray!20},legend pos=north west,xtick={25,50,100}]
+\addplot[mark=*,thick,blue] coordinates {(25,10659)(50,23385)(100,46094)};
+\addlegendentry{実測 wall-clock}
+\end{axis}
+\end{tikzpicture}
+\caption{食事数に対してほぼ線形（$\approx 460$\,ms/食）。傾きは主に HTTP 再ポークの
+ラウンドトリップ（$\approx 0.5$\,s/poke）に由来する。}
+\label{fig:din}
+\end{figure}
+
+\section{GC の実行}
+N-Queens のソルバは \texttt{suicide()} で自滅するが、哲学者の食事のアクター（5フォーク＋5哲学者＋テーブル＝
+\textbf{11個}）は\textbf{常駐}する。各ランの後に \texttt{/api/actors-gc?threshold\_ms=0\&dry=0} を呼んで
+アクター GC を走らせた。GC は毎回 \texttt{total=11, targets=11}（全 11 個が回収対象）を報告し、所要は
+\textbf{220--306\,ms}。これは「哲学者の食事は GC でアクター寿命を管理する」という、N-Queens（自滅）との対照を
+具体的に示す。
+
+\section{考察と限界}
+\begin{itemize}
+  \item \textbf{実測}：型推論クリーン検査の通過、\texttt{-{}-xinu-jit} の C 生成、実機での\emph{正しさ}
+  （各哲学者の食事数）・\emph{完全公平}・GC の回収数と所要時間。
+  \item \textbf{HTTP 支配}：wall-clock は再ポークのラウンドトリップが支配的で、生の食事計算時間ではない
+  （JIT ポンプが load ごとに quiesce する特性のため）。$\approx 460$\,ms/食はほぼ HTTP コスト。
+  \item \textbf{単一ラン}・5哲学者固定・1ノード（メッシュ分散版は今後）。
+\end{itemize}
+
+\section{結論}
+哲学者の食事は AIPL の HM 型推論にとって N-Queens より難しい（相互再帰アクターの occurs check）。
+\textbf{単一クラス化}＋\textbf{nominal 注釈}でこれを克服し、型推論クリーンかつデッドロック\&ライブロックフリーな
+実装が実機 Pi-4 Xinu JIT 上で\textbf{完全公平に 50 回（および 25/100 回）食事}を達成、常駐アクターを\textbf{GC で回収}した。
+N-Queens（計算律速・自滅アクター・1 load で drain）との対照として、哲学者の食事は\textbf{協調律速・常駐アクター・
+持続ループ（再駆動が必要）・GC 管理}という性格を持つ。次段は、この食事ループを WiFi メッシュ越しに分散し
+（境界フォークをノード間で調停）、通信律速の分散コーディネーションを実測することである。
+
+\end{document}

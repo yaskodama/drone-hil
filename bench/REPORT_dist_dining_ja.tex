@@ -1,0 +1,104 @@
+\documentclass[11pt]{ltjsarticle}
+\usepackage[margin=25mm]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\title{\textbf{2台のベアメタル Xinu に分散した哲学者の食事}\\
+\large 哲学者5名を Pi4(AIPL JIT) と Pi3(Chandy--Misra) に 3+2 で分け、50回食事を並行実行}
+\author{drone-hil / xinu-rpi4 $\times$ xinu-raz $\times$ AIPL}
+\date{2026年6月5日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+型推論クリーンな AIPL 哲学者の食事を、\textbf{2台の実機 Xinu ノードに分散}して 50 回食事を並行実行した。
+5名の哲学者を \textbf{3 + 2} に分け、\textbf{Pi4}（Cortex-A72、AIPL JIT）が 3名の環で 30 食、\textbf{Pi3}
+（Cortex-A53、カーネル組込みの Chandy--Misra DiningBench）が 20 食を、\textbf{同時に}担当する。両ノードは独立に
+完走し、合計 50 食を達成した。並行 wall-clock は $\max(t_{Pi4}, t_{Pi3}) = 13.5$\,s で、単一ノードで 50 食を
+こなした場合（$23.4$\,s）に対し \textbf{約 $1.74\times$} の短縮を得た（Pi3 が 20 食をネイティブに $2.1$\,s で
+並行吸収するため）。実装が\textbf{異種}（Pi4=AIPL 待ち行列方式・HTTP 再ポーク駆動、Pi3=組込み CM・ネイティブ）で
+ある点と、これが\emph{共有フォークを持つ1つの環をメッシュ越しに調停}したものではなく\emph{2つの独立サブ問題の並行}
+である点を明示する。
+\end{abstract}
+
+\section{分散の設計}
+哲学者の食事は本来、隣接philがフォークを共有する\emph{結合}した環であり、N-Queens のような無損失分割はできない。
+2台に「適当に分散」するにあたり、各ノードの実行系が異なる（Pi4 は任意 AIPL を JIT、Pi3 は組込み AIPL のみ）ため、
+\textbf{2つの独立な食事サブ問題}を並行実行する方式を採った：
+\begin{itemize}
+  \item \textbf{Pi4（10.0.0.1, AIPL JIT)}：型推論クリーンな \texttt{dining3\_xinu.abcl}（単一クラス \texttt{D}・
+  3名の環・順序付き獲得＋待ち行列フォーク）を \texttt{/actor/load} で投入。JIT ポンプは load ごとに quiesce する
+  ため、各philが quota(=10) に達するまで \texttt{dine} を HTTP 越しに再ポークして駆動。30 食。
+  \item \textbf{Pi3（192.168.3.50, 組込み CM)}：カーネル内蔵の DiningBench（mode 3 = Chandy--Misra、5名の環）を
+  \texttt{/api/dining/start?mode=3\&meals=20} で起動し、\texttt{/api/dining/status} で監視。ネイティブ実行・GC 連携。
+  20 食。
+\end{itemize}
+Mac 側のドライバが両者を\textbf{並行スレッドで同時起動}し、双方の完了を待って集計する。
+分散 wall-clock $= \max(t_{Pi4}, t_{Pi3})$、総食数 $= 30 + 20 = 50$。
+
+\section{結果}
+両ノードとも正しく完走（Pi4 は各phil $10,10,10$＝完全公平、Pi3 は $n\_done=5/5$）。合計 50 食。
+
+\begin{table}[h]\centering
+\caption{2ノード分散・哲学者の食事（50 食）。}
+\label{tab:dd}
+\begin{tabular}{l l r r r r}
+\toprule
+ノード & 実装 & 食数 & 各phil & 時間 (ms) & 備考 \\
+\midrule
+Pi4 (A72) & AIPL JIT・3名環・待ち行列 & 30 & $10,10,10$ & 13475 & 27 pokes, GC 220ms \\
+Pi3 (A53) & 組込み Chandy--Misra・5名環 & 20 & $n\_done\,5/5$ & 2092 & native, GC 連携 \\
+\midrule
+\multicolumn{2}{l}{\textbf{合計 / 分散 wall-clock}} & \textbf{50} & & \textbf{13475} & $=\max(\cdot)$ \\
+\multicolumn{2}{l}{単一ノード 50 食（参考）} & 50 & $10{\times}5$ & 23385 & speedup $\approx 1.74\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}
+\begin{axis}[width=11cm,height=5cm,xbar,bar width=16pt,
+  xlabel={時間 (ms)}, symbolic y coords={Pi3,Pi4,Single},
+  ytick=data, nodes near coords, xmin=0, xmax=27000, grid=major, grid style={gray!20}]
+\addplot coordinates {(2092,Pi3) (13475,Pi4) (23385,Single)};
+\end{axis}
+\end{tikzpicture}\\
+\footnotesize Pi3 = 20食 / Pi4 = 30食 / Single = 単一ノード50食
+\caption{Pi3 は 20 食を $2.1$\,s で並行に吸収し、分散 wall-clock は Pi4 の $13.5$\,s に律速される。
+単一ノード 50 食の $23.4$\,s に対し約 $1.74\times$ の短縮。}
+\label{fig:dd}
+\end{figure}
+
+\section{考察}
+\textbf{なぜ速くなるか。} 単一ノードでは 50 食すべてが HTTP 再ポークに律速される Pi4 上で直列に進む。分散では Pi4 の負荷が
+30 食に減り、残り 20 食を Pi3 がネイティブに（再ポーク不要で）$2.1$\,s で並行処理する。よって wall-clock は
+Pi4 の 30 食分（$13.5$\,s）に律速され、$23.4 \to 13.5$\,s（$\approx 1.74\times$）。
+\textbf{律速の非対称性。} Pi3 は $2.1$\,s で完了後アイドルになり、$13.5-2.1 \approx 11.4$\,s 遊ぶ。Pi4 が
+HTTP 再ポーク方式で重いため、より均衡した分割（Pi4 へ少なく、Pi3 へ多く）にすればさらに縮む余地がある。
+\textbf{GC。} Pi4 の常駐 7 アクター（3フォーク＋3phil＋root）は GC で回収（$220$\,ms）。Pi3 の DiningBench は
+GC アクターと連携してランごとに前回分を回収する（組込み）。
+
+\section{限界（正直な但し書き）}
+\begin{itemize}
+  \item \textbf{異種実装}：Pi4=AIPL 待ち行列方式、Pi3=組込み Chandy--Misra。各ノードの実行系の制約
+  （Pi3 は任意 AIPL を JIT できない）に由来する現実的な妥協であり、同一プログラムの対称分散ではない。
+  \item \textbf{独立サブ問題}：これは\emph{共有フォークを持つ1つの環を WiFi メッシュ越しに調停}したものではなく、
+  2つの独立な食事サブ問題の並行である。真のメッシュ分散（境界フォークをノード間で調停）には、受信ネットワーク
+  $\to$アクターの配送フックという未実装の転送層が要る（今後）。
+  \item \textbf{Pi4 は HTTP 再ポーク律速}（$\approx 460$\,ms/食）で、生の食事計算時間ではない。単一ラン。
+\end{itemize}
+
+\section{結論}
+哲学者5名を 3+2 で 2 台の実機 Xinu に分け、50 回食事を\textbf{並行実行}して合計 50 食を達成、分散 wall-clock
+$13.5$\,s（単一ノード $23.4$\,s に対し $\approx 1.74\times$）を実測した。Pi4 は型推論クリーンな AIPL の
+待ち行列方式（完全公平）、Pi3 は組込み Chandy--Misra（$n\_done\,5/5$）で、それぞれの runtime 特性を活かした。
+次段は、独立サブ問題ではなく\textbf{1つの環の境界フォークを WiFi メッシュ越しに調停}する真のメッシュ分散へ進み、
+通信律速の協調コストを実測することである。
+
+\end{document}

@@ -1,0 +1,110 @@
+// dist_nqueens_xinu.abcl — first-row-partitioned parallel N-Queens for aipl2c/Xinu.
+//
+// Node.bootstrap(n, lo, hi) explores ONLY the row-0 queen columns in [lo, hi),
+// so the N-Queens search tree splits cleanly across mesh nodes:
+//   node A: bootstrap(n, 0,  hi)   -> solutions with row-0 queen in [0,hi)
+//   node B: bootstrap(n, hi, n)    -> the rest
+// The two partition counts SUM to the exact total (disjoint, exhaustive cover
+// of the row-0 placements), so distribution is loss-free.
+//
+// Type-inference-clean: ONE actor class (Node) so `parent` and `reply` have a
+// single concrete type (HM has no unions — two classes both named `reply`
+// reachable through `parent` is what makes the naive 2-class version not
+// type-check).  Root vs internal node is a runtime `is_root` flag.
+// aipl2c constraints honoured: array_get/array_set, <=4-arg methods, suicide(),
+// actor-ref fields initialised with `nil`.
+
+class Node {
+  var parent      = nil;            // actor ref (nil on the root)
+  var parent_slot = 0;
+  var is_root     = 0;
+  var expected    = 0;
+  var received    = 0;
+  var sumv        = 0;
+  var result      = 0;              // root: final solution count for this partition
+  var done        = 0;              // root: completion flag (polled over HTTP)
+
+  method init_parent(par, sl) {
+    parent = par;
+    parent_slot = sl;
+  }
+
+  function safe(cols, r, c) {
+    var i = 0;
+    while (i < r) do {
+      var p = array_get(cols, i);
+      if (p == c)         { return 0; }
+      if (p - c == r - i) { return 0; }
+      if (c - p == r - i) { return 0; }
+      i = i + 1;
+    }
+    return 1;
+  }
+
+  // Internal solver node: enumerate safe placements at row r, spawn one child
+  // per safe column, await their replies.
+  method compute(cols, r, n) {
+    received = 0;  sumv = 0;
+    if (r == n) {
+      send parent.reply(parent_slot, 1);
+      suicide();
+    } else {
+      var c = 0;
+      var n_kids = 0;
+      while (c < n) do {
+        if (safe(cols, r, c)) {
+          var cols2 = array_set(cols, r, c);
+          var child = new Node();
+          send child.init_parent(self, n_kids);
+          send child.compute(cols2, r + 1, n);
+          n_kids = n_kids + 1;
+        }
+        c = c + 1;
+      }
+      expected = n_kids;
+      if (n_kids == 0) {
+        send parent.reply(parent_slot, 0);
+        suicide();
+      }
+    }
+  }
+
+  // Root node: launch only the row-0 branches in this partition [lo, hi).
+  method bootstrap(n, lo, hi) {
+    is_root = 1;  result = 0;  done = 0;  received = 0;  sumv = 0;
+    var cols[12];                       // fresh empty board
+    var c = lo;
+    var k = 0;
+    while (c < hi) do {
+      var cols2 = array_set(cols, 0, c); // place the row-0 queen at column c
+      var child = new Node();
+      send child.init_parent(self, k);
+      send child.compute(cols2, 1, n);   // children continue from row 1
+      k = k + 1;
+      c = c + 1;
+    }
+    expected = k;
+    if (k == 0) { done = 1; }
+  }
+
+  method reply(slot, v: int) {       // v: int pins `+` to integer add (not str concat)
+    sumv = sumv + v;
+    received = received + 1;
+    if (received == expected) {
+      if (is_root == 1) {
+        result = sumv;
+        done = 1;
+        print("[DIST-NQ] partition solutions=" + result);
+      } else {
+        send parent.reply(parent_slot, sumv);
+        suicide();
+      }
+    }
+  }
+
+  method get_solutions(unused) { return result; }
+  method get_done(unused)      { return done; }
+}
+
+var root = new Node();
+send root.bootstrap(__N__, __LO__, __HI__);

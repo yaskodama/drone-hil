@@ -1178,6 +1178,59 @@ requestAnimationFrame(frame);
     for (const k in cache) delete cache[k]; for (const k in custody) delete custody[k];
     sends=0; dels=0; rreqId=0; qSaved=0; buffered=0; delivered=0; drops=0; };
 
+  // ── HIL: link the two REAL Xinu nodes (Pi4=UAV1 10.0.0.1, Pi3=UAV2 10.0.0.2) ──
+  // into an ad-hoc MANET cell via the local bridge (bridge.py @ :8090).  CORS-open,
+  // so the localhost:8000 sim can drive both Pis (over the wired LAN) with one click.
+  const BRIDGE = 'http://localhost:8090';
+  let xinuUp = false, xinuRtt = 0;          // exposed to the link drawer for HIL coloring
+  const xbtn = mkBtn('🛰 Xinuと接続', 96, '#9fb3ff');
+  xbtn.onclick = async () => {
+    if (xbtn.dataset.busy) return;
+    xbtn.dataset.busy = '1';
+    // Toggle: if already connected, this click DISCONNECTS (Pi3 leaves the cell).
+    if (xinuUp) {
+      xbtn.textContent = '🛰 切断中…'; xbtn.style.color = '#ffd66b';
+      try {
+        await (await fetch(BRIDGE+'/disconnect', {cache:'no-store'})).json();
+        xinuUp = false; xinuRtt = 0;
+        xbtn.textContent = '🛰 Xinuと接続'; xbtn.style.color = '#9fb3ff'; xbtn.title = '';
+        if (typeof log==='function') log('XINU','実機 MANET 切断 — Pi4・Pi3 とも radio down（wifi off）','ev');
+      } catch (e) {
+        xbtn.textContent = '🛰 切断失敗'; xbtn.style.color = '#ff9bb0';
+        if (typeof log==='function') log('XINU','切断失敗 — bridge.py(:8090) に接続不可','ev');
+      } finally { delete xbtn.dataset.busy; }
+      return;
+    }
+    if (typeof log==='function') log('XINU','実機 MANET 接続開始: Pi4(10.0.0.1) ⇄ Pi3(10.0.0.2) ad-hoc ch6 …','u1');
+    const get = async (q) => (await fetch(BRIDGE+'/connect'+(q||''), {cache:'no-store'})).json();
+    try {
+      // The bridge runs the (minutes-long, cold-boot firmware) bring-up in a
+      // background thread; we poll it so the button never times out spuriously.
+      let j = await get('?reset=1');                         // start a fresh attempt
+      while (j.state === 'connecting') {
+        xbtn.textContent = `🛰 接続中… ${j.elapsed||0}s`;
+        xbtn.style.color = '#ffd66b'; xbtn.title = j.step || '';
+        await new Promise(r=>setTimeout(r, 3000));
+        j = await get();                                     // poll (no restart)
+      }
+      if (j.state === 'up') {
+        xinuUp = true; xinuRtt = j.rtt_ms|0;
+        xbtn.textContent = `🛰 Xinu接続済 ${xinuRtt}ms`; xbtn.style.color = '#7cf2c2'; xbtn.title='クリックで切断';
+        if (typeof log==='function') log('XINU',`実機 MANET up — Pi4 ⇄ Pi3 配送OK, RTT ${xinuRtt}ms (WiFi IBSS)`,'u2');
+      } else {
+        xinuUp = false;
+        xbtn.textContent = '🛰 接続失敗 (再試行)'; xbtn.style.color = '#ff9bb0';
+        if (typeof log==='function') log('XINU',`接続失敗 pi4=${j.pi4_ok} pi3=${j.pi3_ok} — ${(j.detail||'').slice(0,160)}`,'ev');
+      }
+    } catch (e) {
+      xinuUp = false;
+      xbtn.textContent = '🛰 bridge未起動'; xbtn.style.color = '#ff9bb0';
+      if (typeof log==='function') log('XINU','bridge.py(:8090) に接続不可 — ターミナルで `python3 bridge.py` を起動してください','ev');
+    } finally {
+      delete xbtn.dataset.busy;
+    }
+  };
+
   function nodes(){
     const a = [];
     if (typeof uav1!=='undefined' && uav1) a.push({id:'UAV1',x:uav1.x,y:uav1.y,kind:'uav',col:getCSS('--uav1')});

@@ -1,0 +1,96 @@
+// dining_xinu.abcl — type-inference-clean dining philosophers benchmark for aipl2c/Xinu.
+//
+// ONE actor class `D` plays every role (a fork, a philosopher, or the table),
+// selected at runtime.  This matters for type inference: AIPL's Hindley--Milner
+// checker handles a SELF-recursive actor class (D -> D, like the N-Queens Node)
+// but NOT a mutually-recursive pair (Fork <-> Philosopher), which makes its
+// occurs check build an infinite type.  Folding both into `D` keeps every
+// reference D->D, so the program is type-inference clean (passes aipl2c --check).
+//
+// Correctness — deadlock-free AND livelock-free by construction:
+//   * ORDERED acquisition: every philosopher takes its lower-indexed fork first
+//     (philosopher 4's forks are {4,0} => lo=0, hi=4, the reversed pair that
+//     breaks the circular wait).  => no deadlock.
+//   * QUEUING forks: a request for a held fork parks one waiter (in a 5-ring a
+//     fork has at most one other contender) and is granted on release.  No
+//     busy-retry => no livelock.  => guaranteed progress.
+//   * SELF-DRIVING: after eating, a philosopher messages itself to eat again
+//     until it reaches its per-philosopher quota.  5 phil x quota = total meals.
+
+class D {
+  var idx        = 0;
+  // --- fork role ---
+  var held       = 0;
+  var has_waiter = 0;
+  var waiter     = nil;          // D (the parked philosopher) — self-class ref
+  // --- philosopher role ---
+  var lo_idx  = 0;
+  var hi_idx  = 0;
+  var lo_fork = nil;             // D (fork, acquire first)
+  var hi_fork = nil;             // D (fork, acquire second)
+  var quota   = 0;
+  var meals   = 0;
+
+  // ---- fork methods ----
+  method set_idx(i) { idx = i; held = 0; has_waiter = 0; }
+
+  method request(phil: D) {         // phil = requesting D (passes self)
+    if (held == 0) {
+      held = 1;
+      send phil.granted(idx);
+    } else {
+      has_waiter = 1;
+      waiter = phil;
+    }
+  }
+
+  method release(unused) {
+    held = 0;
+    if (has_waiter == 1) {
+      has_waiter = 0;
+      held = 1;
+      send waiter.granted(idx);  // hand the fork straight to the parked waiter
+    }
+  }
+
+  // ---- philosopher methods ----
+  method init_a(i, li, hi) { idx = i; lo_idx = li; hi_idx = hi; meals = 0; }
+  method init_b(lf: D, hf: D)    { lo_fork = lf; hi_fork = hf; }
+  method set_quota(q)      { quota = q; }
+
+  method dine() { send lo_fork.request(self); }   // request the low fork
+
+  method granted(forkIdx: int) {
+    if (forkIdx == lo_idx) {
+      send hi_fork.request(self);          // got low -> ask for high
+    } else {
+      send lo_fork.release(0);             // got both -> eat, then drop both
+      send hi_fork.release(0);
+      meals = meals + 1;
+      if (meals < quota) { send self.dine(); }   // eat again until quota
+    }
+  }
+
+  method get_meals(unused) { return meals; }
+  method get_done(unused)  { if (meals >= quota) { return 1; } return 0; }
+
+  // ---- table role: build the ring and start everyone ----
+  method setup(quota) {
+    var f0: D = new D();  send f0.set_idx(0);
+    var f1: D = new D();  send f1.set_idx(1);
+    var f2: D = new D();  send f2.set_idx(2);
+    var f3: D = new D();  send f3.set_idx(3);
+    var f4: D = new D();  send f4.set_idx(4);
+    var p0: D = new D();  var p1: D = new D();  var p2: D = new D();  var p3: D = new D();  var p4: D = new D();
+    // phil i uses forks i and i+1; acquire lower index first (phil 4 -> {0,4}).
+    send p0.init_a(0, 0, 1);  send p0.init_b(f0, f1);  send p0.set_quota(quota);
+    send p1.init_a(1, 1, 2);  send p1.init_b(f1, f2);  send p1.set_quota(quota);
+    send p2.init_a(2, 2, 3);  send p2.init_b(f2, f3);  send p2.set_quota(quota);
+    send p3.init_a(3, 3, 4);  send p3.init_b(f3, f4);  send p3.set_quota(quota);
+    send p4.init_a(4, 0, 4);  send p4.init_b(f0, f4);  send p4.set_quota(quota);
+    send p0.dine();  send p1.dine();  send p2.dine();  send p3.dine();  send p4.dine();
+  }
+}
+
+var root = new D();
+send root.setup(__QUOTA__);

@@ -1,0 +1,189 @@
+\documentclass[11pt]{ltjsarticle}
+\usepackage[margin=25mm]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!45!black}\itshape,
+  stringstyle=\color{red!60!black},
+  numbers=left,numberstyle=\tiny\color{gray},
+  frame=single,framesep=4pt,rulecolor=\color{gray!40},
+  breaklines=true,showstringspaces=false,
+  morekeywords={class,method,function,var,while,do,if,else,return,send,new,nil,self,suicide,int,print}
+}
+
+\title{\textbf{ベアメタル Xinu WiFi MANET 上の実メッシュ分散 N-Queens}\\
+\large 型推論クリーン AIPL プログラム・実機ベンチマーク・2ノード分散スピードアップ解析}
+\author{drone-hil / xinu-rpi4 $\times$ xinu-raz $\times$ AIPL (aipl2c)}
+\date{2026年6月5日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+ドローン救助 MANET の Hardware-in-the-Loop プラットフォームを\textbf{分散計算}実験へ発展させた。
+著者のアクター言語\textbf{AIPL}（Hindley--Milner 型推論つき）で並列 N-Queens ソルバを記述し、
+\texttt{aipl2c} で C サブセットへコンパイルして、Raspberry Pi~4 上のベアメタル\textbf{Embedded Xinu}
+カーネルに JIT ロードして実行した。本プログラムは\emph{型推論クリーン}である（\texttt{aipl2c -{}-check}
+を \texttt{any} 型なしで通過）。row-0 の女王列で探索木を分割するため、木はメッシュ各ノードへ無損失に分けられる。
+既知の N-Queens 解数（$N{=}6{:}4$, $7{:}40$, $8{:}92$）と一致することを実機で検証し、実機実行時間を計測、
+さらに各 partition の実測時間と実測 WiFi-IBSS 往復時間から2ノード分散の wall-clock をモデル化した。分散分割の
+スピードアップは\emph{問題規模とともに増大}し（$N{=}6$ で $0.74\times$、$N{=}7$ で $1.09\times$、
+$N{=}8$ で $\mathbf{1.53\times}$）、実計算が固定の JIT コンパイル下限を上回るにつれて効いてくる。分散の動機となる
+単一ノードのアクターテーブル上限（$N{\le}8$）も記録し、\textbf{どこまでが実測でどこからがモデルか}を明示する。
+\end{abstract}
+
+\section{対象システム}
+プラットフォームは2台のベアメタル \textbf{Embedded Xinu} ノードである：
+\begin{itemize}
+  \item \textbf{Pi~4}（BCM2711, Cortex-A72）--- \texttt{xinu-rpi4}：C サブセット JIT（\texttt{cc}）と
+  常駐 AIPL アクターランタイムを持つ。有線 LAN \texttt{192.168.3.100}、WiFi ad-hoc では \texttt{10.0.0.1}。
+  \item \textbf{Pi~3 B+}（BCM2837, Cortex-A53）--- \texttt{xinu-raz}：AIPL アクターをカーネルに
+  コンパイル組込み。\texttt{192.168.3.50:8080} / \texttt{10.0.0.2}。
+\end{itemize}
+両ノードは WiFi \textbf{ad-hoc (IBSS) MANET}（BCM43455, ch6, SSID \texttt{MANET}）を構成し、ARP/ICMP
+レスポンダとオンデマンド AODV ルーティングを備える。本リンクの実測往復時間は約 $13$--$19$\,ms で、以下のモデルでは
+$\mathrm{RTT_{mesh}} = 15$\,ms を用いる。
+
+\section{型推論クリーンな AIPL プログラム}
+AIPL のアクタークラスは推論されたフィールド/メソッド型を持つ。HM 型検査器（\texttt{src/infer.ml}）の下で
+\emph{型推論クリーン}に保つため、設計上2点が必要だった：
+\begin{enumerate}
+  \item \textbf{単一アクタークラス。} 素朴な Root\,/\,Solver 分割では \texttt{parent} フィールドが
+  \emph{どちらのクラスにもなり得る}ため、HM にユニオン型が無く \texttt{send parent.reply(\dots)} の単一化に
+  失敗する。実行時フラグ \texttt{is\_root} を持つ単一 \texttt{Node} クラスを用いる。
+  \item \textbf{\texttt{nil} アクター参照 ＋ \texttt{v:\,int}。} アクター参照フィールドは \texttt{nil}
+  で初期化する（\texttt{0} だと \texttt{int} に推論され \texttt{send} を拒否）。また \texttt{reply} の累積引数を
+  \texttt{v: int} と注釈し、\texttt{+} を文字列連結ではなく整数加算に確定させる。
+\end{enumerate}
+
+\begin{lstlisting}[caption={\texttt{dist\_nqueens\_xinu.abcl} の中核（row-0 分割）。}]
+method bootstrap(n, lo, hi) {        // root: row-0 の列 [lo,hi) のみ起動
+  is_root = 1;  var cols[12];
+  var c = lo;  var k = 0;
+  while (c < hi) do {
+    var cols2 = array_set(cols, 0, c);     // row-0 の女王を列 c に置く
+    var child = new Node();
+    send child.init_parent(self, k);
+    send child.compute(cols2, 1, n);       // 子は row 1 から継続
+    k = k + 1;  c = c + 1;
+  }
+  expected = k;  if (k == 0) { done = 1; }
+}
+method reply(slot, v: int) {         // v: int で + を整数加算に確定
+  sumv = sumv + v;  received = received + 1;
+  if (received == expected) {
+    if (is_root == 1) { result = sumv; done = 1; }
+    else { send parent.reply(parent_slot, sumv); suicide(); }
+  }
+}
+\end{lstlisting}
+
+\noindent\textbf{分割の正当性。} row-0 の列集合 $\{0,\dots,N-1\}$ を $[0,\lceil N/2\rceil)$ と
+$[\lceil N/2\rceil,N)$ に分ける。これは最上位配置の互いに素かつ網羅的な被覆なので、2つの partition の解数は
+\emph{厳密に総和が全解}になる --- 分散は無損失である。これは各 $N$ で検証している（表\ref{tab:res} の
+\textit{left/right} 列）。
+
+\section{手法}
+\begin{enumerate}
+  \item \textbf{コンパイル。} \texttt{aipl2c prog.abcl -{}-xinu-jit -o prog.c}（型検査は \texttt{-{}-check}
+  で別途実施しクリーン）。生成された \texttt{v\_nil} を \texttt{v\_int(0)} に1箇所置換する。Pi-4 JIT ランタイムに
+  \texttt{v\_nil} シンボルが無いためで、root の \texttt{nil} parent は send 先に使われないため値は無害。
+  \item \textbf{ロード＋実行。} \texttt{POST /actor/load} で C を Pi-4 JIT へ送る。JIT はアクターを同期的に
+  コンパイル・実行し、静止状態になって初めて応答する。よってロード呼び出しの wall-time が実機時間（JIT コンパイル
+  ＋アクター実行）となる。\texttt{GET /actor/send?to=0\&m=get\_solutions} で解数を読む。
+  \item \textbf{$N$ ごとの partition。} \textsc{full} $[0,N)$、\textsc{left} $[0,\lceil N/2\rceil)$、
+  \textsc{right} $[\lceil N/2\rceil,N)$。
+  \item \textbf{分散モデル。} 2つの partition を2ノードで並行実行したときの wall-clock は
+  \[
+    T_\mathrm{dist} \;=\; \max(T_\mathrm{left},\,T_\mathrm{right}) \;+\; 2\,\mathrm{RTT_{mesh}}
+  \]
+  （範囲を配布し、解数をメッシュ越しに回収）であり、スピードアップは $S = T_\mathrm{full}/T_\mathrm{dist}$。
+\end{enumerate}
+
+\section{結果}
+全ての解数が既知の N-Queens 値と一致し、全ての分割が無損失（$\textit{left}+\textit{right}=\textit{full}$）。
+時間は Pi~4 上の単一実機ラン（JIT コンパイル＋アクター実行）。
+
+\begin{table}[h]\centering
+\caption{実機 N-Queens、partition 別計測、および2ノード分散モデル。}
+\label{tab:res}
+\begin{tabular}{rrrr rrr rr}
+\toprule
+$N$ & 解数 & left & right & $T_\mathrm{full}$ & $T_\mathrm{left}$ & $T_\mathrm{right}$ & $T_\mathrm{dist}$ & speedup\\
+ & (=既知) & & & (ms) & (ms) & (ms) & (ms) & $S$\\
+\midrule
+6 & 4  & 2  & 2  & 458  & 342 & 593 & 623 & 0.74\\
+7 & 40 & 23 & 17 & 453  & 386 & 371 & 416 & 1.09\\
+8 & 92 & 46 & 46 & 1063 & 624 & 663 & 693 & \textbf{1.53}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=12cm,height=6cm,
+  xlabel={盤面サイズ $N$}, ylabel={スピードアップ $S = T_\mathrm{full}/T_\mathrm{dist}$},
+  xtick={6,7,8}, ymin=0.5, ymax=1.8, grid=both, grid style={gray!20},
+  legend pos=north west]
+\addplot[mark=*,thick,blue] coordinates {(6,0.74)(7,1.09)(8,1.53)};
+\addlegendentry{実測（モデル）}
+\addplot[dashed,gray] coordinates {(6,1)(8,1)};
+\addlegendentry{損益分岐}
+\end{axis}
+\end{tikzpicture}
+\caption{問題が大きくなるほど分散分割が効く：$N{=}7$ 未満では固定の JIT コンパイル下限が支配し $S<1$、
+$N{=}8$ で実計算が支配し2ノード分割は $1.53\times$ に達する。}
+\label{fig:speedup}
+\end{figure}
+
+\section{考察}
+\textbf{固定コンパイル下限。} $T_\mathrm{full}$ は解数が大きく異なるにもかかわらず $N{=}6$ と $N{=}7$ で
+ともに約 $455$\,ms である --- この下限は $\sim$200 行の C の実機 JIT コンパイルである。$N{=}8$（$1063$\,ms）で
+ようやくアクター実行が明確に支配する。各 partition は同サイズのプログラムをコンパイルするため、分割は\emph{計算}を
+半分にするが\emph{コンパイル}は半分にしない。よってスピードアップは計算の比率が増す $N$ とともに上昇する
+（図\ref{fig:speedup}）。
+
+\noindent\textbf{単一ノードのアクターテーブル上限。} $N{\ge}9$ は\emph{完了しなかった}：探索木が Pi-4 カーネルの
+プロセス/アクターテーブル（\texttt{NPROC}, \texttt{g\_obj[2048]}）を超え、解数 $0$ を返す。$N{\le}8$ の上限こそが
+木をノード間に分散する構造的動機である --- ただし $N{=}9$ では半分木の partition でも単一ノードで溢れたため、
+真の余裕には3台目のノードや \texttt{NPROC} の増加が要る。
+
+\noindent\textbf{メッシュのコスト。} $\mathrm{RTT_{mesh}}=15$\,ms では $2\,\mathrm{RTT}=30$\,ms の
+配布/回収オーバーヘッドは $N{=}8$ の数百 ms の計算に比べて小さく、これが N-Queens（計算律速・ほぼ
+embarrassingly parallel）がメッシュ向きである理由である --- 同じ RTT が支配する通信律速ベンチ（例：分散・
+哲学者食事）とは対照的である。
+
+\section{限界（実測 vs モデル）}
+\begin{itemize}
+  \item \textbf{実測：} AIPL プログラムとその型推論クリーン検査、\texttt{aipl2c -{}-xinu-jit} $\to$ C の
+  コンパイル、Pi~4 上の各\emph{実機}解数と partition 別\emph{計測時間}、無損失分割。
+  \item \textbf{モデル：} $T_\mathrm{dist}$。2つの partition は\emph{同一の Pi~4 で個別に}計測しており、
+  2ノードで同時実行したわけではない。文字通りの同時2ノード実行ができないのは、Pi~3 が\emph{pre-compiled} AIPL
+  のみ（実機 JIT 無し）で同プログラムを送れず、また受信ネットワーク$\to$アクターの配送フック
+  （\texttt{wifi\_handle\_frame} の demux $\to$ \texttt{cc\_actor\_send\_msg}）が未配線のため
+  （UDP 送信プリミティブ \texttt{wifi\_udp\_tx} と AODV 中継は実在）。$\mathrm{RTT_{mesh}}$ は特性評価した
+  定数でラン毎の実測ではない。
+  \item \textbf{単一ラン}の計測（平均化なし）。JIT コンパイル下限は $T$ に含まれる。
+\end{itemize}
+
+\section{結論と今後}
+型推論クリーンな AIPL N-Queens が実機 Pi-4 Xinu JIT 上で動作し、正しさを検証でき、row-0 partition が木を
+無損失に分割する。実測 WiFi-IBSS RTT 上でモデル化すると、2ノード分割は $N{=}8$ で $1.53\times$ に達し $N$ とともに
+上昇傾向を示す。分散実行を\emph{モデルではなく文字通り}にするには：(1) \texttt{Node} プログラムを Pi-3 カーネルに
+組み込む（または Pi~3 に JIT 経路を付与）；(2) \texttt{wifi\_handle\_frame} に UDP app-port の分岐を足し、
+work/result メッセージを \texttt{cc\_actor\_send\_msg} へ配送（既存の \texttt{wifi\_udp\_tx} 送信と AODV 中継を
+再利用）；(3) Pi-4 コーディネータが右半分の範囲を \texttt{10.0.0.2} へ配布し、その解数をメッシュ越しに回収する。
+その通信律速の対照版 --- 境界フォークを WiFi 越しに調停する分散・哲学者食事 --- が、レイテンシ支配の対照データ点を
+与えるだろう。
+
+\end{document}

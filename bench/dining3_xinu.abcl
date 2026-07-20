@@ -1,0 +1,64 @@
+// dining3_xinu.abcl — 3-philosopher slice of the distributed dining benchmark
+// (Pi 4 / AIPL JIT side).  Same type-inference-clean single class `D` as
+// dining_xinu.abcl; only setup() builds a 3-ring (philosophers 0,1,2 + forks
+// 0,1,2).  Deadlock-free (ordered acquisition) + livelock-free (queuing forks).
+
+class D {
+  var idx        = 0;
+  var held       = 0;
+  var has_waiter = 0;
+  var waiter     = nil;
+  var lo_idx  = 0;
+  var hi_idx  = 0;
+  var lo_fork = nil;
+  var hi_fork = nil;
+  var quota   = 0;
+  var meals   = 0;
+
+  method set_idx(i) { idx = i; held = 0; has_waiter = 0; }
+
+  method request(phil: D) {
+    if (held == 0) { held = 1; send phil.granted(idx); }
+    else { has_waiter = 1; waiter = phil; }
+  }
+
+  method release(unused) {
+    held = 0;
+    if (has_waiter == 1) { has_waiter = 0; held = 1; send waiter.granted(idx); }
+  }
+
+  method init_a(i, li, hi) { idx = i; lo_idx = li; hi_idx = hi; meals = 0; }
+  method init_b(lf: D, hf: D) { lo_fork = lf; hi_fork = hf; }
+  method set_quota(q)      { quota = q; }
+
+  method dine() { send lo_fork.request(self); }
+
+  method granted(forkIdx: int) {
+    if (forkIdx == lo_idx) {
+      send hi_fork.request(self);
+    } else {
+      send lo_fork.release(0);
+      send hi_fork.release(0);
+      meals = meals + 1;
+      if (meals < quota) { send self.dine(); }
+    }
+  }
+
+  method get_meals(unused) { return meals; }
+  method get_done(unused)  { if (meals >= quota) { return 1; } return 0; }
+
+  method setup(quota) {
+    var f0: D = new D();  send f0.set_idx(0);
+    var f1: D = new D();  send f1.set_idx(1);
+    var f2: D = new D();  send f2.set_idx(2);
+    var p0: D = new D();  var p1: D = new D();  var p2: D = new D();
+    // phil i uses forks i and (i+1) mod 3; acquire lower index first.
+    send p0.init_a(0, 0, 1);  send p0.init_b(f0, f1);  send p0.set_quota(quota);
+    send p1.init_a(1, 1, 2);  send p1.init_b(f1, f2);  send p1.set_quota(quota);
+    send p2.init_a(2, 0, 2);  send p2.init_b(f0, f2);  send p2.set_quota(quota);  // forks {2,0} -> lo0,hi2
+    send p0.dine();  send p1.dine();  send p2.dine();
+  }
+}
+
+var root = new D();
+send root.setup(__QUOTA__);
