@@ -1,5 +1,5 @@
 import { Runtime } from "./runtime.js";
-import { runTypeCheck } from "./typecheck.js";
+import { runTypeCheck, checkReplyAndDeadlines } from "./typecheck.js";
 
 export class Interpreter {
   constructor(printer) {
@@ -19,6 +19,16 @@ export class Interpreter {
         // hard-fail (mirrors OCaml/C "type error" behavior)
         throw new Error("[type error] " + e.message);
       }
+      // reply の線形性と期限の検査。既存のデモを止めないよう、
+      // ここでは投げずに診断として表示する（OCaml 版の期限も既定は警告）。
+      try {
+        const diags = checkReplyAndDeadlines(ast, {
+          strictDeadline: this.strictDeadline === true,
+        });
+        for (const d of diags) {
+          this.runtime.print(`[type] ${d.where}: ${d.message}`);
+        }
+      } catch (_e) { /* 検査自体の失敗で実行を止めない */ }
     }
     this.runtime.reset();
     for (const cls of ast.classes) {
