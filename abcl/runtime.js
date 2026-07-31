@@ -1794,8 +1794,20 @@ export class Runtime {
       actor.mailbox.splice(matchedIndex, 1);
       const localEnv = { ...env };
       matchedCase.params.forEach((p, i) => { localEnv[p] = matchedMsg.args[i]; });
+      // case 本体の reply は「選ばれたメッセージ」への返信である。
+      // Reply は actor.__currentSlotId を見て呼び出し元の slot を埋めるので、
+      // 本体の実行中だけ、受け取ったメッセージの slotId に差し替える。
+      // これをしないと select を書いたメソッド自身の slot（多くは無い）を
+      // 見てしまい、`print(now w.job(1))` が
+      // 「now deadlock: slot not fulfilled」で失敗する。
+      const savedSlot = actor.__currentSlotId;
+      actor.__currentSlotId = matchedMsg.slotId || null;
       let last = null;
-      for (const st of matchedCase.body.statements) last = this.evalStmt(st, localEnv);
+      try {
+        for (const st of matchedCase.body.statements) last = this.evalStmt(st, localEnv);
+      } finally {
+        actor.__currentSlotId = savedSlot;
+      }
       return last;
     }
 
