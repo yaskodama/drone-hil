@@ -94,7 +94,7 @@ class Node {
       if (is_root == 1) {
         result = sumv;
         done = 1;
-        print("[DIST-NQ] partition solutions=" + result);
+        print("[DIST-NQ] partition solutions=" ++ result);
       } else {
         send parent.reply(parent_slot, sumv);
         suicide();

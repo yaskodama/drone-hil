@@ -1834,7 +1834,14 @@ export class Runtime {
           // `++` は文字列連結（両辺を文字列化する全域関数）。
           // OCaml 版で `+` から分離した演算子。
           case "++": return this._toStr(l) + this._toStr(r);
-          case "+":  return l + r;
+          case "+":
+            // `+` は数値専用。文字列連結は `++`（OCaml 版と同じ分離）。
+            if (typeof l === "string" || typeof r === "string") {
+              throw new Error(
+                "`+` は数値専用です。文字列の連結には `++` を使ってください " +
+                "(left=" + typeof l + ", right=" + typeof r + ")");
+            }
+            return l + r;
           case "-":  return l - r;
           case "*":  return l * r;
           case "/":  return l / r;
