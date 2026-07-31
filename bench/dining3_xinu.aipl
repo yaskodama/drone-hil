@@ -1,6 +1,6 @@
-// dining3_xinu.abcl — 3-philosopher slice of the distributed dining benchmark
+// dining3_xinu.aipl — 3-philosopher slice of the distributed dining benchmark
 // (Pi 4 / AIPL JIT side).  Same type-inference-clean single class `D` as
-// dining_xinu.abcl; only setup() builds a 3-ring (philosophers 0,1,2 + forks
+// dining_xinu.aipl; only setup() builds a 3-ring (philosophers 0,1,2 + forks
 // 0,1,2).  Deadlock-free (ordered acquisition) + livelock-free (queuing forks).
 
 class D {

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """dining_bench.py — real on-device benchmark of the type-inference-clean dining
-philosophers (dining_xinu.abcl) on the Xinu Pi 4 JIT runtime, WITH GC.
+philosophers (dining_xinu.aipl) on the Xinu Pi 4 JIT runtime, WITH GC.
 
 5 philosophers x quota meals = `total` meals.  The JIT pump drains a finite
 message budget per /actor/load and then quiesces, so a self-sustaining actor
@@ -14,7 +14,7 @@ import os, sys, time, json, subprocess, urllib.request
 
 PI     = os.environ.get("PI4", "192.168.3.100")
 AIPL2C = "/Users/kodamay/ocaml-app/abclcp-project/_build/default/src/aipl2c.exe"
-ABCL   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dining_xinu.abcl")
+ABCL   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dining_xinu.aipl")
 PHILS  = [6, 7, 8, 9, 10]          # actor ids: root=0, forks=1..5, philosophers=6..10
 
 
@@ -32,7 +32,7 @@ def _int(s):
 
 def gen_c(quota):
     src = open(ABCL).read().replace("__QUOTA__", str(quota))
-    ap, cp = "/tmp/_din_%d.abcl" % quota, "/tmp/_din_%d.c" % quota
+    ap, cp = "/tmp/_din_%d.aipl" % quota, "/tmp/_din_%d.c" % quota
     open(ap, "w").write(src)
     subprocess.run([AIPL2C, ap, "--xinu-jit", "--no-typecheck", "-o", cp],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

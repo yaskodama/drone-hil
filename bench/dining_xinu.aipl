@@ -1,4 +1,4 @@
-// dining_xinu.abcl — type-inference-clean dining philosophers benchmark for aipl2c/Xinu.
+// dining_xinu.aipl — type-inference-clean dining philosophers benchmark for aipl2c/Xinu.
 //
 // ONE actor class `D` plays every role (a fork, a philosopher, or the table),
 // selected at runtime.  This matters for type inference: AIPL's Hindley--Milner

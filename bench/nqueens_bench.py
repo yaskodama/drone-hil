@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """nqueens_bench.py — real on-device benchmark of the first-row-partitioned
-distributed N-Queens (dist_nqueens_xinu.abcl) on the Xinu Pi 4 JIT runtime.
+distributed N-Queens (dist_nqueens_xinu.aipl) on the Xinu Pi 4 JIT runtime.
 
 For each N it times three real /actor/load runs:
   - FULL      partition [0, N)         -> total solution count (sanity: known)
@@ -20,7 +20,7 @@ import os, sys, time, json, math, subprocess, urllib.request
 
 PI       = os.environ.get("PI4", "192.168.3.100")
 AIPL2C   = "/Users/kodamay/ocaml-app/abclcp-project/_build/default/src/aipl2c.exe"
-ABCL     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist_nqueens_xinu.abcl")
+ABCL     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist_nqueens_xinu.aipl")
 RTT_MESH = float(os.environ.get("RTT_MESH_MS", "15.0"))   # measured WiFi-IBSS RTT
 KNOWN    = {1:1,2:0,3:0,4:2,5:10,6:4,7:40,8:92,9:352,10:724,11:2680,12:14200}
 
@@ -39,7 +39,7 @@ def _int(s):
 
 def gen_c(n, lo, hi):
     src = open(ABCL).read().replace("__N__", str(n)).replace("__LO__", str(lo)).replace("__HI__", str(hi))
-    ap = "/tmp/_nq_%d_%d_%d.abcl" % (n, lo, hi)
+    ap = "/tmp/_nq_%d_%d_%d.aipl" % (n, lo, hi)
     cp = ap[:-5] + ".c"
     open(ap, "w").write(src)
     subprocess.run([AIPL2C, ap, "--xinu-jit", "--no-typecheck", "-o", cp],

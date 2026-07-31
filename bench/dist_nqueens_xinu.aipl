@@ -1,4 +1,4 @@
-// dist_nqueens_xinu.abcl — first-row-partitioned parallel N-Queens for aipl2c/Xinu.
+// dist_nqueens_xinu.aipl — first-row-partitioned parallel N-Queens for aipl2c/Xinu.
 //
 // Node.bootstrap(n, lo, hi) explores ONLY the row-0 queen columns in [lo, hi),
 // so the N-Queens search tree splits cleanly across mesh nodes:

@@ -3,7 +3,7 @@
 
 The 5 philosophers are split 3 + 2 across two bare-metal Xinu nodes, run IN
 PARALLEL, and aggregated:
-  * Pi4 (10.0.0.1) — AIPL JIT, a 3-philosopher ring (dining3_xinu.abcl), 30 meals
+  * Pi4 (10.0.0.1) — AIPL JIT, a 3-philosopher ring (dining3_xinu.aipl), 30 meals
     (3 x quota 10).  Driven by re-poking `dine` over /actor/send; GC via
     /api/actors-gc afterwards.
   * Pi3 (192.168.3.50) — built-in Chandy-Misra DiningBench (mode 3), 20 meals,
@@ -16,7 +16,7 @@ import os, time, json, subprocess, urllib.request, threading
 PI4    = "192.168.3.100"
 PI3    = "192.168.3.50:8080"
 AIPL2C = "/Users/kodamay/ocaml-app/abclcp-project/_build/default/src/aipl2c.exe"
-ABCL3  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dining3_xinu.abcl")
+ABCL3  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dining3_xinu.aipl")
 P4_PHILS = [4, 5, 6]          # actor ids of the 3 philosophers on Pi4
 P4_QUOTA = 10                 # 3 x 10 = 30 meals on Pi4
 P3_MEALS = 20                 # 20 meals on Pi3
@@ -38,8 +38,8 @@ def _int(s):
 
 def run_pi4():
     src = open(ABCL3).read().replace("__QUOTA__", str(P4_QUOTA))
-    open("/tmp/_d3.abcl", "w").write(src)
-    subprocess.run([AIPL2C, "/tmp/_d3.abcl", "--xinu-jit", "--no-typecheck", "-o", "/tmp/_d3.c"],
+    open("/tmp/_d3.aipl", "w").write(src)
+    subprocess.run([AIPL2C, "/tmp/_d3.aipl", "--xinu-jit", "--no-typecheck", "-o", "/tmp/_d3.c"],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     csrc = open("/tmp/_d3.c").read().replace("v_nil", "v_int(0)").encode()
     t0 = time.time()
