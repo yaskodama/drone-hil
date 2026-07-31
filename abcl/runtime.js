@@ -4,6 +4,7 @@ const ACTOR_COLORS = ["#ff6060", "#60ff60", "#6090ff", "#ffcc00", "#ff60ff", "#6
 export class Runtime {
   constructor(printer = console.log) {
     this.print = printer;
+    this._deferredReplies = [];
     this.classes = new Map();
     this.actors = new Map();
     this.nextId = 1;
@@ -206,6 +207,21 @@ export class Runtime {
     return id;
   }
 
+  // wait で据え置かれた返信のうち、実時刻が来たものを解決する。
+  // 戻り値は「まだ待っている返信が残っているか」。drain 側は
+  // 仕事が無くてもこれが true の間は回り続ける必要がある。
+  _flushDeferredReplies() {
+    if (!this._deferredReplies || this._deferredReplies.length === 0) return false;
+    const now = Date.now();
+    const rest = [];
+    for (const d of this._deferredReplies) {
+      if (d.notBefore <= now) this.fulfillReplySlot(d.slotId, d.value);
+      else rest.push(d);
+    }
+    this._deferredReplies = rest;
+    return rest.length > 0;
+  }
+
   fulfillReplySlot(slotId, value) {
     const slot = this.replySlots.get(slotId);
     if (slot && !slot.fulfilled) {
@@ -218,6 +234,7 @@ export class Runtime {
   // them, synchronously (bypassing setTimeout). Returns true if a message
   // was processed, false if nothing was dispatchable.
   _drainOneStep() {
+    const stillWaiting = this._flushDeferredReplies();
     for (const [, actor] of this.actors) {
       if (actor.processing) continue;
       const idx = actor.mailbox.findIndex(m => actor.methods.has(m.methodName));
@@ -234,7 +251,9 @@ export class Runtime {
       actor.processing = false;
       return true;
     }
-    return false;
+    // 仕事は無いが、据え置かれた返信の時刻待ちが残っているなら
+    // まだ進む余地がある（ここで false を返すと deadlock 扱いになる）。
+    return stillWaiting;
   }
 
   // Drain actor mailboxes until the given slot is fulfilled. Throws if no
@@ -351,7 +370,16 @@ export class Runtime {
         if (actorName) {
           const actor = this.actors.get(actorName);
           if (actor && actor.__currentSlotId) {
-            this.fulfillReplySlot(actor.__currentSlotId, v);
+            const delay = actor.__replyDelayMs || 0;
+            if (delay > 0) {
+              actor.__replyDelayMs = 0;
+              this._deferredReplies.push({
+                slotId: actor.__currentSlotId, value: v,
+                notBefore: Date.now() + delay,
+              });
+            } else {
+              this.fulfillReplySlot(actor.__currentSlotId, v);
+            }
           }
         }
         this.print(`[REPLY] value=${v}`);
@@ -487,7 +515,15 @@ export class Runtime {
       case "wait": {
         // Delay next message dispatch for this actor
         const ms = Number(args[0]) || 0;
-        if (actor) actor.__nextDelay = ms;
+        if (actor) {
+          actor.__nextDelay = ms;
+          // OCaml 版・Py-I の wait はメソッド実行中にブロックするので、
+          // その後の reply も ms だけ遅れる。ブラウザでは同期ブロックできない
+          // ため、代わりに「この先の reply を ms だけ遅らせる」形で近似する。
+          // これをしないと `wait(300); reply(x);` が即返信し、
+          // now ... timeout 100 else 0 の期限が発火しない（g7_deadline）。
+          actor.__replyDelayMs = (actor.__replyDelayMs || 0) + ms;
+        }
         break;
       }
       case "canvas_line":
