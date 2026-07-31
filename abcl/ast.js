@@ -10,11 +10,12 @@ export function VarField(name, expr) {
   return { type: "VarField", name, expr };
 }
 
-export function MethodDecl(name, params, body, ret, eff) {
+export function MethodDecl(name, params, body, ret, eff, paramTypes) {
   // ret: 戻り値型注釈の型名（`: T`）または null
   // eff: 効果注釈の名前配列（`!{a, b}`）または null
   return { type: "MethodDecl", name, params, body,
-           ret: ret || null, eff: eff || null };
+           ret: ret || null, eff: eff || null,
+           paramTypes: paramTypes || null };
 }
 
 export function Seq(statements) {

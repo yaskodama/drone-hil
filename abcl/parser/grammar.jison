@@ -126,7 +126,9 @@ dim_list
 
 method_decl
   : METHOD IDENT '(' params ')' opt_ret opt_eff '{' stmts '}'
-      { $$ = yy.MethodDecl($2, $4, yy.Seq($9), $6, $7); }
+      { $$ = yy.MethodDecl($2, $4.map(function (p) { return p.name; }),
+                           yy.Seq($9), $6, $7,
+                           $4.map(function (p) { return p.ty; })); }
   ;
 
 /* 戻り値型注釈 `: T`（OCaml 版 parser.mly の opt_ret と同形）。
@@ -148,13 +150,22 @@ eff_list
   |                       { $$ = []; }
   ;
 
+/* 引数は `x` でも `x: T` でも書ける（OCaml 版・Py-I と同じ）。
+   型は名前として持つだけで、検査は typecheck.js の仕事。
+   AST の params は従来どおり名前の配列にし、型は paramTypes に並べる
+   ---- 既存の参照箇所を壊さないため。 */
 params
-  : IDENT
+  : param
       { $$ = [$1]; }
-  | params ',' IDENT
+  | params ',' param
       { $$ = $1.concat([$3]); }
   |
       { $$ = []; }
+  ;
+
+param
+  : IDENT             { $$ = { name: $1, ty: null }; }
+  | IDENT ':' IDENT   { $$ = { name: $1, ty: $3 }; }
   ;
 
 stmts
@@ -207,7 +218,11 @@ select_cases
 
 select_case
   : CASE IDENT '(' params ')' ARROW '{' stmts '}'
-      { $$ = yy.SelectCase($2, $4, yy.Seq($8)); }
+      /* params は {name, ty} の並びになったので、ここでは名前だけ取り出す。
+         SelectCase.params を名前の配列のままにしておかないと、
+         case 本体の束縛（localEnv[p]）がオブジェクトをキーにしてしまい、
+         引数が見えなくなる。 */
+      { $$ = yy.SelectCase($2, $4.map(function (p) { return p.name; }), yy.Seq($8)); }
   ;
 
 timeout_opt
