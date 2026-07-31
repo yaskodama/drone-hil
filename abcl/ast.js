@@ -10,8 +10,11 @@ export function VarField(name, expr) {
   return { type: "VarField", name, expr };
 }
 
-export function MethodDecl(name, params, body) {
-  return { type: "MethodDecl", name, params, body };
+export function MethodDecl(name, params, body, ret, eff) {
+  // ret: 戻り値型注釈の型名（`: T`）または null
+  // eff: 効果注釈の名前配列（`!{a, b}`）または null
+  return { type: "MethodDecl", name, params, body,
+           ret: ret || null, eff: eff || null };
 }
 
 export function Seq(statements) {
@@ -48,6 +51,10 @@ export function NewExpr(className, args = []) {
 
 export function Var(name) {
   return { type: "Var", name };
+}
+
+export function BoolLit(value) {
+  return { type: "BoolLit", value: !!value };
 }
 
 export function IntLit(value) {
@@ -103,16 +110,18 @@ export function SelectCase(method, params, body) {
   return { type: "SelectCase", method, params, body };
 }
 
-export function Now(target, method, args) {
-  return { type: "Now", target, method, args };
+export function Now(target, method, args, deadline) {
+  // deadline は { ms, alt } か null/undefined。OCaml 版の
+  // `now t.m(a) timeout <ms> else <expr>` に対応する。
+  return { type: "Now", target, method, args, deadline: deadline || null };
 }
 
 export function Future(target, method, args) {
   return { type: "Future", target, method, args };
 }
 
-export function Await(expr) {
-  return { type: "Await", expr };
+export function Await(expr, deadline) {
+  return { type: "Await", expr, deadline: deadline || null };
 }
 
 export function ArraySized(dims, init) {

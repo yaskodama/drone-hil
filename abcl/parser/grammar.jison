@@ -24,6 +24,9 @@
 <saga>"step"        return 'STEP';
 <saga>"compensate"  return 'COMPENSATE';
 "->"         return 'ARROW';
+"++"         return 'CONCAT';
+"true"       return 'TRUE';
+"false"      return 'FALSE';
 "=="         return 'EQ';
 "!="         return 'NEQ';
 "<="         return 'LE';
@@ -39,6 +42,8 @@
 "("  return '(';
 ")"  return ')';
 ";"  return ';';
+":"  return ':';
+"!"  return '!';
 ","  return ',';
 "."  return '.';
 "="  return '=';
@@ -62,7 +67,9 @@
    used by the `AWAIT expr` rule so the prefix `await` doesn't create
    shift/reduce conflicts with following binops. Mirrors the
    OCaml-side parser.mly. */
-%left EQ NEQ LT GT LE GE
+%left EQ NEQ
+%left LT GT LE GE
+%left CONCAT
 %left '+' '-'
 %left '*' '/'
 %nonassoc UAWAIT
@@ -118,8 +125,27 @@ dim_list
   ;
 
 method_decl
-  : METHOD IDENT '(' params ')' '{' stmts '}'
-      { $$ = yy.MethodDecl($2, $4, yy.Seq($7)); }
+  : METHOD IDENT '(' params ')' opt_ret opt_eff '{' stmts '}'
+      { $$ = yy.MethodDecl($2, $4, yy.Seq($9), $6, $7); }
+  ;
+
+/* 戻り値型注釈 `: T`（OCaml 版 parser.mly の opt_ret と同形）。
+   ここでは型名を持つだけで、検査は typecheck.js の仕事。 */
+opt_ret
+  : ':' IDENT   { $$ = $2; }
+  |             { $$ = null; }
+  ;
+
+/* 効果注釈 `!{a, b}`（OCaml 版の opt_eff）。 */
+opt_eff
+  : '!' '{' eff_list '}'  { $$ = $3; }
+  |                       { $$ = null; }
+  ;
+
+eff_list
+  : IDENT                 { $$ = [$1]; }
+  | eff_list ',' IDENT    { $$ = $1.concat([$3]); }
+  |                       { $$ = []; }
   ;
 
 params
@@ -212,6 +238,13 @@ expr
   | AWAIT expr %prec UAWAIT             { $$ = yy.Await($2); }
   | IDENT dim_list                      { $$ = yy.IndexExpr($1, $2); }
   | '(' expr ')'              { $$ = $2; }
+  | TRUE                      { $$ = yy.BoolLit(true); }
+  | FALSE                     { $$ = yy.BoolLit(false); }
+  | NOW IDENT '.' IDENT '(' args ')' TIMEOUT INT ELSE expr
+      { $$ = yy.Now($2, $4, $6, { ms: Number($9), alt: $11 }); }
+  | AWAIT expr TIMEOUT INT ELSE expr %prec UAWAIT
+      { $$ = yy.Await($2, { ms: Number($4), alt: $6 }); }
+  | expr CONCAT expr          { $$ = yy.Binop('++', $1, $3); }
   | expr '+' expr             { $$ = yy.Binop('+', $1, $3); }
   | expr '-' expr             { $$ = yy.Binop('-', $1, $3); }
   | expr '*' expr             { $$ = yy.Binop('*', $1, $3); }

@@ -248,6 +248,26 @@ export class Runtime {
     return this.replySlots.get(slotId).value;
   }
 
+  // 期限つきの待ち。OCaml 版の `timeout <ms> else <expr>` 用。
+  // 戻り値は { ok, value }。ok=false なら時間切れ（呼び出し側が else 節を評価する）。
+  // 進める仕事が尽きた場合も、無期限版と違って例外にせず時間切れ扱いにする
+  // ---- 期限を書いた側は「返らないこと」を織り込んでいるため。
+  drainUntilSlotTimed(slotId, maxMs) {
+    const start = Date.now();
+    while (!this.replySlots.get(slotId).fulfilled) {
+      if (Date.now() - start >= maxMs) return { ok: false, value: null };
+      if (!this._drainOneStep()) return { ok: false, value: null };
+    }
+    return { ok: true, value: this.replySlots.get(slotId).value };
+  }
+
+  _toStr(v) {
+    if (v === true) return "true";
+    if (v === false) return "false";
+    if (v === null || v === undefined) return "";
+    return String(v);
+  }
+
   // Schedule an actor to process its next dispatchable message
   scheduleActor(actor, delayMs = 0) {
     if (actor.processing || actor.scheduled) return;
@@ -1791,6 +1811,7 @@ export class Runtime {
   evalExpr(expr, env) {
     switch (expr.type) {
       case "IntLit":    return expr.value;
+      case "BoolLit":   return expr.value;
       case "FloatLit":  return expr.value;
       case "StringLit": return expr.value;
 
@@ -1810,16 +1831,23 @@ export class Runtime {
         const l = this.evalExpr(expr.left, env);
         const r = this.evalExpr(expr.right, env);
         switch (expr.op) {
+          // `++` は文字列連結（両辺を文字列化する全域関数）。
+          // OCaml 版で `+` から分離した演算子。
+          case "++": return this._toStr(l) + this._toStr(r);
           case "+":  return l + r;
           case "-":  return l - r;
           case "*":  return l * r;
           case "/":  return l / r;
-          case "==": return l === r ? 1 : 0;
-          case "!=": return l !== r ? 1 : 0;
-          case "<":  return l <  r ? 1 : 0;
-          case ">":  return l >  r ? 1 : 0;
-          case "<=": return l <= r ? 1 : 0;
-          case ">=": return l >= r ? 1 : 0;
+          // 比較は真偽値を返す（OCaml 版に合わせる）。従来は 1/0 だったので
+          // `"b = " ++ (1 < 2)` が "b = 1" になり出力が食い違っていた。
+          // 条件判定は if (c) の真偽値判定なので 0/false ともに偽で、
+          // 数値文脈でも JS は true を 1 として扱うため既存コードは壊れない。
+          case "==": return l === r;
+          case "!=": return l !== r;
+          case "<":  return l <  r;
+          case ">":  return l >  r;
+          case "<=": return l <= r;
+          case ">=": return l >= r;
         }
         throw new Error("Unsupported op: " + expr.op);
       }
@@ -1912,7 +1940,9 @@ export class Runtime {
         const args = expr.args.map(a => this.evalExpr(a, env));
         const slotId = this.newReplySlot();
         this.send(target, expr.method, args, false, senderName, slotId);
-        return this.drainUntilSlot(slotId);
+        if (!expr.deadline) return this.drainUntilSlot(slotId);
+        const r = this.drainUntilSlotTimed(slotId, expr.deadline.ms);
+        return r.ok ? r.value : this.evalExpr(expr.deadline.alt, env);
       }
 
       case "Future": {
@@ -1927,6 +1957,14 @@ export class Runtime {
       case "Await": {
         const fut = this.evalExpr(expr.expr, env);
         if (fut && typeof fut === "object" && fut.__future) {
+          if (expr.deadline) {
+            const r = this.drainUntilSlotTimed(fut.slotId, expr.deadline.ms);
+            if (!r.ok) return this.evalExpr(expr.deadline.alt, env);
+            if (fut._aios_meta) {
+              this.protocolObserveAll(fut._aios_meta.alias, fut._aios_meta.method);
+            }
+            return r.value;
+          }
           const value = this.drainUntilSlot(fut.slotId);
           if (fut._aios_meta) {
             this.protocolObserveAll(fut._aios_meta.alias, fut._aios_meta.method);
