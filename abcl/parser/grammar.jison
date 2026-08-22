@@ -47,6 +47,7 @@
 ";"  return ';';
 ":"  return ':';
 "!"  return '!';
+"@"  return 'AT';
 ","  return ',';
 "."  return '.';
 "="  return '=';
@@ -129,10 +130,17 @@ dim_list
   ;
 
 method_decl
-  : METHOD IDENT '(' params ')' opt_ret opt_eff '{' stmts '}'
-      { $$ = yy.MethodDecl($2, $4.map(function (p) { return p.name; }),
-                           yy.Seq($9), $6, $7,
-                           $4.map(function (p) { return p.ty; })); }
+  : METHOD IDENT '(' params ')' opt_ret opt_level opt_eff '{' stmts '}'
+      { var md = yy.MethodDecl($2, $4.map(function (p) { return p.name; }),
+                               yy.Seq($10), $6, $8,
+                               $4.map(function (p) { return p.ty; }));
+        md.level = $7; $$ = md; }
+  ;
+
+/* 義務レベル `@ 3`。now/await は厳密に大きいレベルへしか向かえない。 */
+opt_level
+  : AT INT   { $$ = Number($2); }
+  |          { $$ = null; }
   ;
 
 /* 戻り値型注釈 `: T`（OCaml 版 parser.mly の opt_ret と同形）。

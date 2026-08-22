@@ -513,3 +513,85 @@ export function checkReplyLinearity(ast) {
   }
   return issues;
 }
+
+// ---------------------------------------------------------------------
+// (1) reply の全域性 ---- now/await で待たれるメソッドは必ず返す。
+//     デッドロックは循環待ちだけではない。閉路が無くても、
+//     呼ばれる側が reply しなければ待ちは返らない。
+// (2) 義務レベル ---- now/await は厳密に大きいレベルへしか向かえない。
+//     両端に注釈があるときだけ検査する（明示宣言のみの段階）。
+// 待ちの辺は checkWaitCycle と同じ作り方で集める。
+// ---------------------------------------------------------------------
+function waitEdgesOf(ast) {
+  const fieldClass = {}, edges = [];
+  for (const cls of (ast.classes || [])) {
+    fieldClass[cls.name] = {};
+    for (const f of (cls.fields || [])) {
+      if (f.expr && f.expr.type === "NewExpr") fieldClass[cls.name][f.name] = f.expr.className;
+    }
+  }
+  const classOfParam = (md, name) => {
+    const i = (md.params || []).indexOf(name);
+    return (i >= 0 && md.paramTypes && md.paramTypes[i]) ? md.paramTypes[i] : null;
+  };
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const from = `${cls.name}.${md.name}`;
+      const localClass = {};
+      const walk = (n) => {
+        if (!n || typeof n !== "object") return;
+        if (n.type === "VarDecl" && n.expr && n.expr.type === "NewExpr") {
+          localClass[n.name] = n.expr.className;
+        }
+        if (n.type === "Now" || n.type === "Future") {
+          const t = (typeof n.target === "string") ? n.target
+                  : (n.target && n.target.name) ? n.target.name : null;
+          let c = null;
+          if (n.target && n.target.type === "NewExpr") c = n.target.className;
+          else if (t === "self") c = cls.name;
+          else if (t) c = localClass[t] || fieldClass[cls.name][t] || classOfParam(md, t);
+          if (c) edges.push([from, `${c}.${n.method}`]);
+        }
+        for (const k of Object.keys(n)) {
+          const v = n[k];
+          if (Array.isArray(v)) v.forEach(walk);
+          else if (v && typeof v === "object") walk(v);
+        }
+      };
+      walk(md.body);
+    }
+  }
+  return edges;
+}
+
+export function checkReplyTotality(ast) {
+  const issues = [];
+  const waited = new Set(waitEdgesOf(ast).map(([, b]) => b));
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const key = `${cls.name}.${md.name}`;
+      if (!waited.has(key)) continue;
+      if (usesReplyto(md.body)) continue;
+      if (!repliesOnAllPaths(stmtsOf(md.body))) {
+        issues.push(`method ${cls.name}.${md.name}: now/await で待たれるのに、reply しない経路がある`);
+      }
+    }
+  }
+  return issues;
+}
+
+export function checkLevels(ast) {
+  const issues = [], lv = {};
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      if (md.level !== null && md.level !== undefined) lv[`${cls.name}.${md.name}`] = md.level;
+    }
+  }
+  for (const [a, b] of waitEdgesOf(ast)) {
+    if (a in lv && b in lv && lv[b] <= lv[a]) {
+      issues.push(`義務レベル: ${a} (@${lv[a]}) が ${b} (@${lv[b]}) を待っている` +
+                  `（待ちは厳密に大きいレベルへ向かわなければならない）`);
+    }
+  }
+  return issues;
+}
