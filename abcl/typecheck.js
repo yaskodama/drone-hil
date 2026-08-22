@@ -580,17 +580,45 @@ export function checkReplyTotality(ast) {
   return issues;
 }
 
+// 注釈が無いメソッドにはレベルを推論する ---- 待ちの辺 (a,b) を見て
+// level(b) <= level(a) なら b を押し上げる、を不動点まで繰り返す。
+// 明示注釈は固定点で、押し上げが要るのに動かせなければそこが矛盾。
+// これで片方にしか注釈が無い辺も検査できる。
 export function checkLevels(ast) {
-  const issues = [], lv = {};
+  const issues = [], lv = {}, fixed = new Set();
   for (const cls of (ast.classes || [])) {
     for (const md of (cls.methods || [])) {
-      if (md.level !== null && md.level !== undefined) lv[`${cls.name}.${md.name}`] = md.level;
+      const key = `${cls.name}.${md.name}`;
+      const n = md.level;
+      lv[key] = (n === null || n === undefined) ? 0 : n;
+      if (n !== null && n !== undefined) fixed.add(key);
     }
   }
-  for (const [a, b] of waitEdgesOf(ast)) {
-    if (a in lv && b in lv && lv[b] <= lv[a]) {
-      issues.push(`義務レベル: ${a} (@${lv[a]}) が ${b} (@${lv[b]}) を待っている` +
-                  `（待ちは厳密に大きいレベルへ向かわなければならない）`);
+  const edges = waitEdgesOf(ast);
+  let converged = false;
+  for (let i = 0; i < 1000; i++) {
+    let changed = false;
+    for (const [a, b] of edges) {
+      const la = lv[a] || 0, lb = lv[b] || 0;
+      if (lb <= la) {
+        if (fixed.has(b)) {
+          issues.push(`義務レベル: ${a} (@${la}) が ${b} (@${lb}) を待っている` +
+                      `（待ちは厳密に大きいレベルへ向かわなければならない）`);
+          return issues;
+        }
+        lv[b] = la + 1;
+        changed = true;
+      }
+    }
+    if (!changed) { converged = true; break; }
+  }
+  if (!converged) {
+    issues.push("義務レベルが収束しない（待ちのグラフに閉路がある）");
+    return issues;
+  }
+  if (typeof process !== "undefined" && process.env?.AIOS_SHOW_LEVELS === "1") {
+    for (const [k, v] of Object.entries(lv).sort((x, y) => x[1] - y[1])) {
+      console.error(`[level] ${k.padEnd(28)} @${v}${fixed.has(k) ? " (declared)" : ""}`);
     }
   }
   return issues;
