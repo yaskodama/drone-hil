@@ -632,7 +632,25 @@ export class Runtime {
         if (!this._heldRes) this._heldRes = new Set();
         if (this._heldRes.has(args[0]))
           throw new Error("acquire: resource already held: " + args[0]);
+        // 宣言された全体順序があれば、下位を持ったまま上位へ、の向きだけ許す。
+        // 静的検査は名前がリテラルの acquire しか追えないので、ここで捕まえる。
+        const rank = this._resRank;
+        if (rank && rank.has(args[0])) {
+          const rk = rank.get(args[0]);
+          for (const h of this._heldRes) {
+            if (rank.has(h) && rank.get(h) >= rk)
+              throw new Error("acquire: " + h + " is held, so " + args[0] +
+                " must not be acquired now (declared order)");
+          }
+        }
         this._heldRes.add(args[0]);
+        return null;
+      }
+      case "resource_order": {
+        // 資源への全体順序の宣言。型検査が読むのが主。
+        if (!this._resRank) this._resRank = new Map();
+        String(args[0] || "").split("->").map(x => x.trim()).filter(x => x)
+          .forEach((n, i) => this._resRank.set(n, i));
         return null;
       }
       case "release": {
@@ -2130,7 +2148,7 @@ export class Runtime {
             // 文として登録した組込み（is_ok / value / acquire など）は
             // 式の位置からも呼べなければならない。ここへ落として拾う。
             if (["answer", "is_ok", "timed_out", "value", "acquire", "release",
-                 "source_of", "node_allow", "deploy"]
+                 "resource_order", "source_of", "node_allow", "deploy"]
                   .includes(expr.name)) {
               return this._callBuiltin(expr.name, args, env);
             }

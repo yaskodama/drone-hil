@@ -279,9 +279,19 @@ function resNameOf(n) {
 
 export function checkResourceUse(ast) {
   const issues = [];
-  for (const cls of (ast.classes || [])) {
-    for (const md of (cls.methods || [])) {
-      const where = `method ${cls.name}.${md.name}`;
+  // 資源の入れ子から集める辺 "下位\u0000上位" -> どこで
+  const edges = new Map();
+  const opaque = [];
+  // メソッドとトップレベルを同じ形で回す
+  const bodies = [];
+  for (const cls of (ast.classes || []))
+    for (const md of (cls.methods || []))
+      bodies.push([`method ${cls.name}.${md.name}`, md.body]);
+  bodies.push(["top level",
+    { type: "Seq", statements: (ast.statements || ast.stmts || []) }]);
+  {
+    for (const [where, body] of bodies) {
+      const md = { body };
       const say = (m) => issues.push(`${where}: ${m}`);
 
       const expr = (e, held) => {
@@ -290,7 +300,15 @@ export function checkResourceUse(ast) {
           const r = resNameOf(e);
           if (e.name === "acquire" && r !== null) {
             if (held.has(r)) { say(`資源 ${r} を二重に acquire している`); return held; }
+            // すでに持っているものは、これより先に取られた＝下位である
+            for (const hh of held)
+              if (hh !== r && !edges.has(hh + "\u0000" + r))
+                edges.set(hh + "\u0000" + r, where);
             const h = new Set(held); h.add(r); return h;
+          }
+          if (e.name === "acquire" && r === null && (e.args || []).length) {
+            // 名前が実行時に決まる acquire は追えない。覚えておく。
+            opaque.push(where);
           }
           if (e.name === "release" && r !== null) {
             if (!held.has(r)) { say(`取得していない資源 ${r} を release している`); return held; }
@@ -337,9 +355,110 @@ export function checkResourceUse(ast) {
 
       const left = stmt(md.body, new Set());
       if (left.size) {
-        say(`資源 ${[...left].sort().join(", ")} を持ったままメソッドを抜けている`);
+        say(where === "top level"
+          ? `資源 ${[...left].sort().join(", ")} を持ったままプログラムが終わる`
+          : `資源 ${[...left].sort().join(", ")} を持ったままメソッドを抜けている`);
       }
     }
+  }
+  issues.push(...checkResourceOrder(ast, edges, opaque));
+  return issues;
+}
+
+// ---------------------------------------------------------------------
+// 資源への全体順序。
+// 対の検査は「取ったら返す」までしか見ない。
+// 二つのアクターが同じ二つの資源を逆の順序で取ると、
+// どちらも対は正しいのに、実行するとお互いを待つ。
+// 取得の入れ子から集めた辺に閉路が無ければ、全体順序を作れる。
+// resource_order("a -> b -> c") で明示的に辺を足せる。
+// ---------------------------------------------------------------------
+function checkResourceOrder(ast, edges, opaque) {
+  const issues = [];
+  // 1) 宣言された順序
+  const walk = (n) => {
+    if (!n || typeof n !== "object") return;
+    if ((n.type === "CallExpr" || n.type === "CallStmt") &&
+        n.name === "resource_order") {
+      const a = n.args || [];
+      if (a.length === 1 && a[0] && a[0].type === "StringLit") {
+        const names = String(a[0].value).split("->")
+          .map(x => x.trim()).filter(x => x);
+        for (let i = 0; i + 1 < names.length; i++) {
+          const k = names[i] + "\u0000" + names[i + 1];
+          if (!edges.has(k)) edges.set(k, "resource_order");
+        }
+      }
+    }
+    for (const k of Object.keys(n)) {
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") walk(v);
+    }
+  };
+  for (const st of (ast.statements || ast.stmts || [])) walk(st);
+  if (!edges.size) return issues;
+
+  // 2) 閉路 = 逆順に取る場所がある
+  const succ = new Map();
+  for (const k of edges.keys()) {
+    const [a, b] = k.split("\u0000");
+    if (!succ.has(a)) succ.set(a, []);
+    succ.get(a).push(b);
+  }
+  const color = new Map();
+  let found = null;
+  const go = (n, path) => {
+    if (found) return;
+    const c = color.get(n);
+    if (c === 2) return;
+    if (c === 1) {
+      const acc = [];
+      for (const x of path) {
+        if (x === n) { found = [n, ...acc]; return; }
+        acc.unshift(x);
+      }
+      return;
+    }
+    color.set(n, 1);
+    for (const m of (succ.get(n) || [])) go(m, [n, ...path]);
+    color.set(n, 2);
+  };
+  for (const a of [...succ.keys()]) go(a, []);
+
+  if (found) {
+    const cyc = found;
+    const es = cyc.map((a, i) => [a, cyc[(i + 1) % cyc.length]]);
+    const where = es.map(([a, b]) =>
+      `${a} は ${b} より先（${edges.get(a + "\u0000" + b) || "?"}）`).join("; ");
+    issues.push("resource order: 資源の順序 " + cyc.join(" -> ") +
+      ` -> ${cyc[0]} が循環している（${where}）。逆の順序で取るとデッドロックする`);
+    return issues;
+  }
+
+  const env = (typeof process !== "undefined" && process.env) ? process.env : {};
+  // 3) 追えなかった acquire を知らせる（既定では黙る）
+  if (env.AIOS_STRICT_RESOURCE === "1")
+    for (const w of opaque)
+      console.error(`[warn] ${w}: 名前がリテラルでない acquire があり、順序を検査できない`);
+  // 4) 推論した全体順序を見せる
+  if (env.AIOS_SHOW_LEVELS === "1") {
+    const nodes = new Set();
+    for (const k of edges.keys()) k.split("\u0000").forEach(x => nodes.add(x));
+    const depth = new Map();
+    const dOf = (n) => {
+      if (depth.has(n)) return depth.get(n);
+      depth.set(n, 0);
+      let d = 0;
+      for (const m of (succ.get(n) || [])) d = Math.max(d, 1 + dOf(m));
+      depth.set(n, d);
+      return d;
+    };
+    for (const n of nodes) dOf(n);
+    const mx = Math.max(0, ...depth.values());
+    [...depth.entries()].map(([n, d]) => [n, mx - d])
+      .sort((x, y) => x[1] - y[1] || (x[0] < y[0] ? -1 : 1))
+      .forEach(([n, d]) => console.error(`[resource] ${n.padEnd(20)} @${d}`));
   }
   return issues;
 }
