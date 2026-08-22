@@ -769,3 +769,115 @@ export function checkSelect(ast) {
   void strictDl; void strictSel;
   return issues;
 }
+
+// ---------------------------------------------------------------------
+// セッション型 ---- 実行時のプロトコルを型検査へ持ち上げる。
+// protocol_define / protocol_start / protocol_end を読み、
+// トップレベルの送信の順序が約束どおりかを走らせる前に見る。
+// セッションがアクターをまたぐ場合は静的に追えないので、
+// 「やり残し」は既定では言わない（AIOS_STRICT_PROTOCOL=1 で警告）。
+// ---------------------------------------------------------------------
+function parseProtoSpec(spec) {
+  const out = [];
+  for (const part of String(spec).split("->")) {
+    const p = part.trim();
+    const i = p.indexOf(".");
+    if (i > 0) out.push([p.slice(0, i).trim(), p.slice(i + 1).trim()]);
+  }
+  return out;
+}
+
+function sendsOfNode(n, acc) {
+  if (!n || typeof n !== "object") return;
+  if (n.type === "Send" || n.type === "Now" || n.type === "Future") {
+    for (const a of (n.args || [])) sendsOfNode(a, acc);
+    const t = (typeof n.target === "string") ? n.target
+            : (n.target && n.target.name) ? n.target.name : null;
+    if (t && n.method) acc.push([t, n.method]);
+    return;
+  }
+  if ((n.type === "CallExpr" || n.type === "CallStmt") &&
+      ["aios_now", "aios_send", "remote_now"].includes(n.name)) {
+    const a = n.args || [];
+    if (a.length >= 2 && a[0].type === "StringLit" && a[1].type === "StringLit") {
+      for (const x of a.slice(2)) sendsOfNode(x, acc);
+      acc.push([a[0].value, a[1].value]);
+      return;
+    }
+  }
+  for (const k of Object.keys(n)) {
+    const v = n[k];
+    if (Array.isArray(v)) v.forEach(x => sendsOfNode(x, acc));
+    else if (v && typeof v === "object") sendsOfNode(v, acc);
+  }
+}
+
+export function checkProtocols(ast) {
+  const issues = [];
+  const stmts = ast.statements || ast.stmts || [];
+  const defs = {};
+  for (const st of stmts) {
+    if (st && st.type === "CallStmt" && st.name === "protocol_define") {
+      const a = st.args || [];
+      if (a.length === 2 && a[0].type === "StringLit" && a[1].type === "StringLit") {
+        defs[a[0].value] = parseProtoSpec(a[1].value);
+      }
+    }
+  }
+  if (!Object.keys(defs).length) return issues;
+
+  const top = [];
+  for (const st of stmts) sendsOfNode(st, top);
+  const inTop = (s) => top.some(([a, m]) => a === s[0] && m === s[1]);
+
+  const strict = typeof process !== "undefined" &&
+                 process.env?.AIOS_STRICT_PROTOCOL === "1";
+  let active = null, cur = [], full = false;
+  for (const st of stmts) {
+    let started = null;
+    if (st.type === "CallStmt" && st.name === "protocol_start") {
+      const a = st.args || [];
+      if (a[0] && a[0].type === "StringLit") started = a[0].value;
+    } else if (st.type === "VarDecl" && st.expr &&
+               st.expr.type === "CallExpr" && st.expr.name === "protocol_start") {
+      const a = st.expr.args || [];
+      if (a[0] && a[0].type === "StringLit") started = a[0].value;
+    }
+    if (started !== null) {
+      if (!(started in defs)) issues.push(`protocol_start: 未知のプロトコル ${started}`);
+      else { active = started; cur = defs[started].slice(); full = defs[started].every(inTop); }
+      continue;
+    }
+    if (st.type === "CallStmt" && st.name === "protocol_end") {
+      if (active !== null && cur.length) {
+        const [a, m] = cur[0];
+        const msg = `プロトコル ${active} が protocol_end の時点で未完了（次に期待するのは ${a}.${m}）`;
+        if (full) issues.push(msg);
+        else if (strict) issues.push(msg + "（続きは別のアクターの中かもしれない）");
+      }
+      active = null; cur = [];
+      continue;
+    }
+    if (active === null) continue;
+    const acc = [];
+    sendsOfNode(st, acc);
+    const all = defs[active];
+    for (const [t, m] of acc) {
+      if (!all.some(([a, b]) => a === t && b === m)) continue;   // 無関係な送信
+      if (!cur.length) continue;
+      const [ea, em] = cur[0];
+      if (ea === t && em === m) cur = cur.slice(1);
+      else {
+        issues.push(`プロトコル ${active}: ${ea}.${em} を期待しているが ${t}.${m} を送っている`);
+        return issues;
+      }
+    }
+  }
+  if (active !== null && cur.length) {
+    const [a, m] = cur[0];
+    const msg = `プロトコル ${active} が完了していない（次に期待するのは ${a}.${m}）`;
+    if (full) issues.push(msg);
+    else if (strict) issues.push(msg);
+  }
+  return issues;
+}
