@@ -670,3 +670,102 @@ export function checkLevels(ast) {
   }
   return issues;
 }
+
+// ---------------------------------------------------------------------
+// select の規律。待ちが返らなくなる三つ目の経路 ----
+// 閉路でも返信漏れでもなく、「誰も送らない」だけで詰まる。
+//   1. 期限を書く（書かなければ警告。now / await と同じ）
+//   2. 待つメッセージを誰かが送っているか
+// 外部からの送り手（web_expose / web_listen / deploy / remote）があれば
+// 当てにならないので検査しない。
+// ---------------------------------------------------------------------
+export function checkSelect(ast) {
+  const issues = [];
+  const strictDl = typeof process !== "undefined" &&
+                   ["1", "true", "yes"].includes(process.env?.AIOS_STRICT_DEADLINE);
+  const strictSel = typeof process !== "undefined" &&
+                    ["1", "true", "yes"].includes(process.env?.AIOS_STRICT_SELECT);
+
+  // 送られたメッセージを集める
+  const sent = new Set();
+  const fieldClass = {};
+  for (const cls of (ast.classes || [])) {
+    fieldClass[cls.name] = {};
+    for (const f of (cls.fields || [])) {
+      if (f.expr && f.expr.type === "NewExpr") fieldClass[cls.name][f.name] = f.expr.className;
+    }
+  }
+  let external = false;
+  const collectSent = (n, ownerCls, md, localClass) => {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "VarDecl" && n.expr && n.expr.type === "NewExpr") {
+      localClass[n.name] = n.expr.className;
+    }
+    if (n.type === "Send" || n.type === "Now" || n.type === "Future") {
+      const t = (typeof n.target === "string") ? n.target
+              : (n.target && n.target.name) ? n.target.name : null;
+      if (t && t.includes("/")) external = true;
+      let c = null;
+      if (n.target && n.target.type === "NewExpr") c = n.target.className;
+      else if (t === "self") c = ownerCls;
+      else if (t) {
+        const i = md ? (md.params || []).indexOf(t) : -1;
+        c = localClass[t] || (fieldClass[ownerCls] || {})[t]
+            || (i >= 0 && md.paramTypes ? md.paramTypes[i] : null);
+      }
+      if (c) sent.add(`${c}.${n.method}`);
+    }
+    if ((n.type === "CallStmt" || n.type === "CallExpr") &&
+        ["web_expose", "web_listen", "deploy"].includes(n.name)) external = true;
+    for (const k of Object.keys(n)) {
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(x => collectSent(x, ownerCls, md, localClass));
+      else if (v && typeof v === "object") collectSent(v, ownerCls, md, localClass);
+    }
+  };
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) collectSent(md.body, cls.name, md, {});
+  }
+  // トップレベルの `var x = new C();` を先に拾っておかないと、
+  // `send w.serve();` の宛先クラスが分からず「誰も送っていない」と誤検出する。
+  const topLocal = {};
+  for (const st of (ast.statements || ast.stmts || [])) {
+    if (st && st.type === "VarDecl" && st.expr && st.expr.type === "NewExpr") {
+      topLocal[st.name] = st.expr.className;
+    }
+  }
+  for (const st of (ast.statements || ast.stmts || [])) collectSent(st, null, null, topLocal);
+
+  // select を見る
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const where = `method ${cls.name}.${md.name}`;
+      const walk = (n) => {
+        if (!n || typeof n !== "object") return;
+        if (n.type === "Select") {
+          if (n.timeoutMs === null || n.timeoutMs === undefined) {
+            const msg = `${where}: 期限の無い select は永久に待ちうる（\`timeout <ms> -> { ... }\` と書く）`;
+            issues.push(msg);
+          }
+          if (!external) {
+            for (const c of (n.cases || [])) {
+              const mn = c.method || c.name;
+              if (mn && !sent.has(`${cls.name}.${mn}`)) {
+                issues.push(`${where}: select が ${cls.name}.${mn} を待っているが、` +
+                            `このプログラムの中で誰も送っていない`);
+              }
+            }
+          }
+        }
+        for (const k of Object.keys(n)) {
+          const v = n[k];
+          if (Array.isArray(v)) v.forEach(walk);
+          else if (v && typeof v === "object") walk(v);
+        }
+      };
+      walk(md.body);
+    }
+  }
+  void strictDl; void strictSel;
+  return issues;
+}
