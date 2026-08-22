@@ -9,6 +9,8 @@
 "call"       return 'CALL';
 "if"         return 'IF';
 "else"       return 'ELSE';
+"while"      return 'WHILE';
+"do"         return 'DO';
 "send!"      return 'UNSAFESEND';
 "send"       return 'SEND';
 "now"        return 'NOW';
@@ -72,6 +74,7 @@
 %left CONCAT
 %left '+' '-'
 %left '*' '/'
+%right UMINUS
 %nonassoc UAWAIT
 
 %{
@@ -188,6 +191,7 @@ stmt
   | CALL IDENT '(' args ')' ';'                  { $$ = yy.CallStmt($2, $4); }
   | IDENT '(' args ')' ';'                       { $$ = yy.CallStmt($1, $3); }
   | IF '(' expr ')' '{' stmts '}' else_opt       { $$ = yy.If($3, yy.Seq($6), $8); }
+  | WHILE expr DO '{' stmts '}'                   { $$ = yy.While($2, yy.Seq($5)); }
   | SELECT '{' select_cases timeout_opt '}'      { $$ = yy.Select($3, $4.ms, $4.body); }
   | SAGA '{' saga_steps '}'                      { $$ = yy.SagaStmt($3); }
   ;
@@ -257,8 +261,14 @@ expr
   | FALSE                     { $$ = yy.BoolLit(false); }
   | NOW IDENT '.' IDENT '(' args ')' TIMEOUT INT ELSE expr
       { $$ = yy.Now($2, $4, $6, { ms: Number($9), alt: $11 }); }
+  /* else を書かない形。値は result<τ> になり、成功したかどうかを型で持つ。 */
+  | NOW IDENT '.' IDENT '(' args ')' TIMEOUT INT
+      { $$ = yy.Now($2, $4, $6, { ms: Number($9), alt: null }); }
   | AWAIT expr TIMEOUT INT ELSE expr %prec UAWAIT
       { $$ = yy.Await($2, { ms: Number($4), alt: $6 }); }
+  | AWAIT expr TIMEOUT INT %prec UAWAIT
+      { $$ = yy.Await($2, { ms: Number($4), alt: null }); }
+  | '-' expr %prec UMINUS     { $$ = yy.Binop('-', yy.IntLit(0), $2); }
   | expr CONCAT expr          { $$ = yy.Binop('++', $1, $3); }
   | expr '+' expr             { $$ = yy.Binop('+', $1, $3); }
   | expr '-' expr             { $$ = yy.Binop('-', $1, $3); }

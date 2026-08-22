@@ -103,6 +103,16 @@ export function If(cond, thenBody, elseBody) {
   return { type: "If", cond, thenBody, elseBody };
 }
 
+// while <cond> do { ... }。OCaml 版・Py-I にはあったが JS-I の文法に無かった。
+export function While(cond, body) {
+  return { type: "While", cond, body };
+}
+
+// become C(args);。自分の振る舞いを別のクラスへ置き換える。
+export function Become(className, args) {
+  return { type: "Become", className, args };
+}
+
 export function Select(cases, timeoutMs = null, timeoutBody = null) {
   return { type: "Select", cases, timeoutMs, timeoutBody };
 }

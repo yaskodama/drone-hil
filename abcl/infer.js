@@ -26,8 +26,11 @@ import * as T from "./types.js";
 
 // ─── builtin effect labels (mirrors typecheck.js's existing table) ──
 export const BUILTIN_EFFECTS = {
-  ai_call:              ["ai"],
-  ai_call_with_system:  ["ai"],
+  // 機外のモデルを呼ぶので net も持つ（OCaml 版・Py-I と揃える）。
+  // JS-I だけ ai だけを持っており、「AI を使うが機外へは出ない」と
+  // 区別がつかなくなっていた。
+  ai_call:              ["ai", "net"],
+  ai_call_with_system:  ["ai", "net"],
   read_file:            ["fs"],
   write_file:           ["fs", "mut"],
   append_file:          ["fs", "mut"],
@@ -632,10 +635,26 @@ function checkProgram(ast) {
 }
 
 // ─── effect collection (mirrors typecheck.js::collectMethodEffects) ─
-function collectMethodEffects(ast) {
+export function collectMethodEffects(ast) {
   const effects = {};
+  // クラスごとのフィールド名を AST から直接作る。
+  // 以前は types.js の登録済みテーブル（lookupFieldType）を見ていたが、
+  // 効果収集だけを単体で走らせるとテーブルが空で、
+  // フィールド代入が一件も mut にならなかった。
+  const fieldNames = {};
+  const fieldClass = {};      // クラス名 -> (フィールド名 -> 宛先クラス名)
+  const localClass = {};      // "C.m" -> (ローカル変数名 -> 宛先クラス名)
   for (const cls of (ast.classes || [])) {
     effects[cls.name] = {};
+    fieldNames[cls.name] = new Set((cls.fields || []).map(f => f.name));
+    // `var p = new Planner();` のように new で初期化されたフィールドは、
+    // 宛先のクラスが静的に分かる。now / future の効果を引き継ぐ辺を張るのに使う。
+    fieldClass[cls.name] = {};
+    for (const f of (cls.fields || [])) {
+      if (f.expr && f.expr.type === "NewExpr" && f.expr.className) {
+        fieldClass[cls.name][f.name] = f.expr.className;
+      }
+    }
     for (const md of (cls.methods || [])) effects[cls.name][md.name] = new Set();
   }
 
@@ -652,12 +671,19 @@ function collectMethodEffects(ast) {
       case "Seq":
         (node.statements || []).forEach(s => direct(s, ownerCls, ownerMethod));
         return;
-      case "VarDecl":
+      case "VarDecl": {
+        if (node.expr && node.expr.type === "NewExpr" && node.expr.className) {
+          const k = `${ownerCls}.${ownerMethod}`;
+          if (!localClass[k]) localClass[k] = {};
+          localClass[k][node.name] = node.expr.className;
+        }
         direct(node.expr, ownerCls, ownerMethod);
         return;
+      }
       case "Assign": {
         // Field assignment counts as mut
-        if (T.lookupFieldType(ownerCls, node.name) !== null) add("mut");
+        if ((fieldNames[ownerCls] && fieldNames[ownerCls].has(node.name)) ||
+            T.lookupFieldType(ownerCls, node.name) !== null) add("mut");
         direct(node.expr, ownerCls, ownerMethod);
         return;
       }
@@ -667,12 +693,35 @@ function collectMethodEffects(ast) {
         (node.dims || []).forEach(d => direct(d, ownerCls, ownerMethod));
         return;
       case "Send":
+        // send は送って待たないので、呼ばれる側の効果を引き継がない
+        // （ガイド g6 の ViaSend に明記された仕様。OCaml 版もそうしている）。
+        // 辺を張らずに引数だけ見る。
+        (node.args || []).forEach(a => direct(a, ownerCls, ownerMethod));
+        return;
       case "Now":
       case "Future": {
-        add("mut");
-        // Best-effort target-class resolution (only the LocalTarget actor case)
+        // メッセージを送ること自体は「自分の状態を変える」ではない。
+        // ここで mut を足していたため、reply するだけのメソッドまで mut を持ち、
+        // 宣言と照合すると正しいプログラムが軒並み落ちた。
+        // OCaml 版（正）では mut はフィールド代入と become だけが生む。
+        // 宛先のクラスを解決して、呼ばれる側の効果を引き継ぐ辺を張る。
+        // 以前は宛先が `new C()` と直に書かれた場合しか見ておらず、
+        // `var p = new Planner(); ... now p.plan(x)` の形で効果が伝播しなかった。
         if (node.target && node.target.type === "NewExpr") {
           addEdge(`${ownerCls}.${ownerMethod}`, [node.target.className, node.method]);
+        } else {
+          // 宛先は文字列（変数名）で来ることがある。オブジェクトだと決めつけない。
+          const tname =
+            (typeof node.target === "string") ? node.target
+            : (node.target && node.target.type === "Var") ? node.target.name
+            : null;
+          if (tname && tname !== "self" && tname !== "sender") {
+            const k = `${ownerCls}.${ownerMethod}`;
+            const cls =
+              (localClass[k] && localClass[k][tname]) ||
+              (fieldClass[ownerCls] && fieldClass[ownerCls][tname]);
+            if (cls) addEdge(k, [cls, node.method]);
+          }
         }
         // For self-sends, propagate to same class
         if (node.target && node.target.type === "Var" && node.target.name === "self") {
@@ -685,7 +734,7 @@ function collectMethodEffects(ast) {
         direct(node.expr, ownerCls, ownerMethod);
         return;
       case "Reply":
-        add("mut");
+        // reply も同じ理由で mut を生まない（返信は自分の状態の変更ではない）。
         direct(node.expr, ownerCls, ownerMethod);
         return;
       case "CallStmt": {

@@ -12,6 +12,7 @@
 
 export { TypeError } from "./types.js";
 export { BUILTIN_EFFECTS, runInference } from "./infer.js";
+import { collectMethodEffects } from "./infer.js";
 
 import { runInference as _runInference } from "./infer.js";
 
@@ -145,4 +146,257 @@ export function checkReplyAndDeadlines(ast, opts = {}) {
                message: `${kind} に期限が無い（\`${kind} ... timeout <ms> else <expr>\` と書く）` });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------
+// 宣言した効果と、本体から集めた効果の照合。
+// infer.js の collectMethodEffects は呼び出しの辺と不動点まで持っているのに、
+// その結果を宣言（md.eff）と突き合わせる箇所がどこにも無かった。
+// そのため `!{log}` と書いたメソッドが mut / ai / net を持っていても素通りしていた。
+// OCaml 版 infer.ml の check_effect_annotations、Py-I の
+// _check_effect_declarations に対応する。
+// ---------------------------------------------------------------------
+export function checkEffectDeclarations(ast) {
+  const issues = [];
+  // 例外は握りつぶさない。握りつぶすと「検査したのに何も出ない」状態になり、
+  // 実際これで一度、未定義の関数を呼んでいることに気づけなかった。
+  const effects = collectMethodEffects(ast);
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const declared = md.eff;   // 未注釈なら undefined。その場合は推論に任せる
+      if (!declared) continue;
+      const dset = new Set(declared);
+      const actual = (effects[cls.name] && effects[cls.name][md.name]) || new Set();
+      const missing = [...actual].filter(e => !dset.has(e)).sort();
+      if (missing.length) {
+        issues.push(
+          `method ${cls.name}.${md.name}: effect set incomplete — declared {` +
+          [...dset].sort().join(", ") + `} but uses {` +
+          [...actual].sort().join(", ") + `}; missing: {` + missing.join(", ") + `}`);
+      }
+    }
+  }
+  return issues;
+}
+
+// ---------------------------------------------------------------------
+// 未宣言の名前への代入。
+// 読み出しは弾かれるのに代入だけ素通りしていたので、
+// フィールド名を打ち間違えると、フィールドは更新されないまま
+// 別の変数ができて何のエラーも出なかった。
+// AIOS_LAX_ASSIGN=1（Node なら env）で従来の暗黙宣言に戻せる。
+// ---------------------------------------------------------------------
+export function checkUndeclaredAssign(ast) {
+  const issues = [];
+  const lax = (typeof process !== "undefined" &&
+               ["1", "true", "yes"].includes(process.env?.AIOS_LAX_ASSIGN));
+  if (lax) return issues;
+
+  for (const cls of (ast.classes || [])) {
+    const fields = new Set((cls.fields || []).map(f => f.name));
+    for (const md of (cls.methods || [])) {
+      const known = new Set([...fields, ...(md.params || []),
+                             "self", "sender"]);
+      const walk = (n) => {
+        if (!n || typeof n !== "object") return;
+        switch (n.type) {
+          case "VarDecl":
+            walk(n.expr);
+            known.add(n.name);          // 宣言はここから有効
+            return;
+          case "Assign":
+            if (!known.has(n.name)) {
+              issues.push(
+                `method ${cls.name}.${md.name}: 未宣言の名前 \`${n.name}\` に代入している` +
+                `（\`var ${n.name} = ...\` と宣言する）`);
+            }
+            walk(n.expr);
+            return;
+          default: {
+            for (const k of Object.keys(n)) {
+              const v = n[k];
+              if (Array.isArray(v)) v.forEach(walk);
+              else if (v && typeof v === "object") walk(v);
+            }
+          }
+        }
+      };
+      walk(md.body);
+    }
+  }
+  return issues;
+}
+
+// ---------------------------------------------------------------------
+// 期限が正でない now / await。0 ミリ秒は待ちにならないので、
+// 書いた本人の意図と実際がずれる。
+// OCaml 版は `timeout must be positive` として弾いている。
+// ---------------------------------------------------------------------
+export function checkBadDeadlines(ast) {
+  const issues = [];
+  const seen = new Set();
+  const walk = (n, where) => {
+    if (!n || typeof n !== "object") return;
+    if ((n.type === "Now" || n.type === "Await") && n.deadline) {
+      const ms = (typeof n.deadline.ms === "number") ? n.deadline.ms
+               : (typeof n.deadline.ms?.value === "number") ? n.deadline.ms.value
+               : null;
+      if (ms !== null && ms <= 0) {
+        const key = `${where}|${n.type}|${ms}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          issues.push(`${where}: ${n.type === "Now" ? "now" : "await"} の期限が ${ms} ミリ秒（正の値でなければならない）`);
+        }
+      }
+    }
+    for (const k of Object.keys(n)) {
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(x => walk(x, where));
+      else if (v && typeof v === "object") walk(v, where);
+    }
+  };
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) walk(md.body, `method ${cls.name}.${md.name}`);
+  }
+  // トップレベルにも現れる（`print(now c.f(1) timeout 0 else 0);`）
+  for (const st of (ast.statements || ast.stmts || [])) walk(st, "top level");
+  return issues;
+}
+
+// ---------------------------------------------------------------------
+// 資源の使用順序（acquire / release）と、循環待ち（now / await の閉路）。
+// OCaml 版 infer.ml の check_resource_use / wait_cycle、
+// Py-I の _check_resource_use / _check_wait_cycle に対応する。
+// ---------------------------------------------------------------------
+function resNameOf(n) {
+  const a = n.args || [];
+  if (a.length === 1 && a[0] && a[0].type === "StringLit") return a[0].value;
+  return null;
+}
+
+export function checkResourceUse(ast) {
+  const issues = [];
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const where = `method ${cls.name}.${md.name}`;
+      const say = (m) => issues.push(`${where}: ${m}`);
+
+      const expr = (e, held) => {
+        if (!e || typeof e !== "object") return held;
+        if (e.type === "CallExpr" || e.type === "CallStmt") {
+          const r = resNameOf(e);
+          if (e.name === "acquire" && r !== null) {
+            if (held.has(r)) { say(`資源 ${r} を二重に acquire している`); return held; }
+            const h = new Set(held); h.add(r); return h;
+          }
+          if (e.name === "release" && r !== null) {
+            if (!held.has(r)) { say(`取得していない資源 ${r} を release している`); return held; }
+            const h = new Set(held); h.delete(r); return h;
+          }
+        }
+        for (const k of Object.keys(e)) {
+          const v = e[k];
+          if (Array.isArray(v)) for (const x of v) held = expr(x, held);
+          else if (v && typeof v === "object") held = expr(v, held);
+        }
+        return held;
+      };
+
+      const same = (a, b) =>
+        a.size === b.size && [...a].every(x => b.has(x));
+
+      const stmt = (st, held) => {
+        if (!st || typeof st !== "object") return held;
+        switch (st.type) {
+          case "Seq":
+            for (const x of (st.statements || [])) held = stmt(x, held);
+            return held;
+          case "If": {
+            const h = expr(st.cond, held);
+            const ha = stmt(st.thenBody, h);
+            const hb = st.elseBody ? stmt(st.elseBody, h) : h;
+            if (!same(ha, hb)) {
+              const d = [...new Set([...ha, ...hb])].filter(x => ha.has(x) !== hb.has(x));
+              say(`二つの枝で持っている資源が食い違う（${d.join(", ")}）`);
+            }
+            return ha;
+          }
+          case "While": {
+            const h = expr(st.cond, held);
+            const hb = stmt(st.body, h);
+            if (!same(h, hb)) say("ループの本体は持ち物を変えてはならない");
+            return h;
+          }
+          default:
+            return expr(st, held);
+        }
+      };
+
+      const left = stmt(md.body, new Set());
+      if (left.size) {
+        say(`資源 ${[...left].sort().join(", ")} を持ったままメソッドを抜けている`);
+      }
+    }
+  }
+  return issues;
+}
+
+export function checkWaitCycle(ast) {
+  // 宛先のクラスを解決して、待つ呼び出し（Now / Await 経由の Future）の辺を作る。
+  const fieldClass = {}, edges = [];
+  for (const cls of (ast.classes || [])) {
+    fieldClass[cls.name] = {};
+    for (const f of (cls.fields || [])) {
+      if (f.expr && f.expr.type === "NewExpr") fieldClass[cls.name][f.name] = f.expr.className;
+    }
+  }
+  const classOfParam = (md, name) => {
+    const i = (md.params || []).indexOf(name);
+    return (i >= 0 && md.paramTypes && md.paramTypes[i]) ? md.paramTypes[i] : null;
+  };
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const from = `${cls.name}.${md.name}`;
+      const localClass = {};
+      const walk = (n) => {
+        if (!n || typeof n !== "object") return;
+        if (n.type === "VarDecl" && n.expr && n.expr.type === "NewExpr") {
+          localClass[n.name] = n.expr.className;
+        }
+        if (n.type === "Now" || n.type === "Future") {
+          const t = (typeof n.target === "string") ? n.target
+                  : (n.target && n.target.name) ? n.target.name : null;
+          let c = null;
+          if (n.target && n.target.type === "NewExpr") c = n.target.className;
+          else if (t === "self") c = cls.name;
+          else if (t) c = localClass[t] || fieldClass[cls.name][t] || classOfParam(md, t);
+          if (c) edges.push([from, `${c}.${n.method}`]);
+        }
+        for (const k of Object.keys(n)) {
+          const v = n[k];
+          if (Array.isArray(v)) v.forEach(walk);
+          else if (v && typeof v === "object") walk(v);
+        }
+      };
+      walk(md.body);
+    }
+  }
+  const succ = {};
+  for (const [a, b] of edges) (succ[a] = succ[a] || []).push(b);
+  const state = {}, found = [];
+  const dfs = (path, n) => {
+    if (found.length) return;
+    if (state[n] === 1) {
+      const i = path.indexOf(n);
+      found.push(i >= 0 ? path.slice(i).concat([n]) : [n]);
+      return;
+    }
+    if (state[n] === 2) return;
+    state[n] = 1;
+    for (const m of (succ[n] || [])) dfs(path.concat([n]), m);
+    state[n] = 2;
+  };
+  for (const k of Object.keys(succ)) if (!found.length) dfs([], k);
+  if (!found.length) return [];
+  return [`循環待ち: ${found[0].join(" -> ")}（now/await の閉路。期限が無ければ確実に詰まる）`];
 }

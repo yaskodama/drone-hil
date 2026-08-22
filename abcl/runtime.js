@@ -147,6 +147,16 @@ export class Runtime {
         case "/": return l / r;
       }
     }
+    // フィールドを `var src = new Source();` と書いた場合。
+    // ここに NewExpr の枝が無く、最後の `return 0` に落ちていたため、
+    // フィールドはアクターではなく数値 0 になり、
+    // そこへ送ると "actor not found: 0" で黙って失敗していた。
+    if (expr.type === "NewExpr") {
+      const name = expr.className.toLowerCase() + this.nextId++;
+      const initArgs = (expr.args || []).map(a => this._evalFieldExpr(a, state));
+      this.createActor(name, expr.className, initArgs);
+      return name;              // JS-I はアクターを名前で指す
+    }
     if (expr.type === "ArraySized") {
       const dims = expr.dims.map(d => this._evalFieldExpr(d, state) | 0);
       const fill = expr.init === null
@@ -453,6 +463,43 @@ export class Runtime {
         return null;
       }
 
+      case "While": {
+        // while <cond> do { ... }
+        // 暴走したときに黙って固まらないよう、回数の上限を置く。
+        let guard = 0;
+        while (this.evalExpr(stmt.cond, env)) {
+          for (const st of stmt.body.statements) this.evalStmt(st, env);
+          if (++guard > 1000000) {
+            throw new Error("while loop exceeded 1,000,000 iterations");
+          }
+        }
+        return null;
+      }
+
+      case "Become": {
+        // 自分の振る舞いを別のクラスへ置き換える。
+        // 状態（state）は残し、新しいクラスに無い欄はそのまま、
+        // 新しいクラスにしかない欄だけ初期化する。
+        const actor = this.actors.get(env.__currentActor);
+        if (!actor) throw new Error("become outside an actor");
+        const cls = this.classes.get(stmt.className);
+        if (!cls) throw new Error("Class not found: " + stmt.className);
+        actor.className = stmt.className;
+        actor.methods = new Map(cls.methods.map(m => [m.name, m]));
+        for (const field of (cls.fields || [])) {
+          if (!(field.name in actor.state)) {
+            actor.state[field.name] = this._evalFieldExpr(field.expr, actor.state);
+          }
+        }
+        if (actor.methods.has("init")) {
+          const args = (stmt.args || []).map(a => this.evalExpr(a, env));
+          actor.mailbox.unshift({ methodName: "init", args,
+                                  unsafe: false, senderName: null });
+          this.scheduleActor(actor);
+        }
+        return null;
+      }
+
       case "Select":
         return this.evalSelect(stmt, env);
 
@@ -512,6 +559,38 @@ export class Runtime {
     if (ap.handled) return ap.value;
 
     switch (name) {
+      // ---- result<τ> と資源（OCaml 版・Py-I と同じ組込み） ----
+      case "is_ok": {
+        const r = args[0];
+        if (!r || r.__result !== true) throw new Error("is_ok(r): a result is expected");
+        return r.ok;
+      }
+      case "timed_out": {
+        const r = args[0];
+        if (!r || r.__result !== true) throw new Error("timed_out(r): a result is expected");
+        return !r.ok;
+      }
+      case "value": {
+        const r = args[0];
+        if (!r || r.__result !== true)
+          throw new Error("value(r, default): a result and a default are expected");
+        return r.ok ? r.value : args[1];
+      }
+      case "acquire": {
+        if (!this._heldRes) this._heldRes = new Set();
+        if (this._heldRes.has(args[0]))
+          throw new Error("acquire: resource already held: " + args[0]);
+        this._heldRes.add(args[0]);
+        return null;
+      }
+      case "release": {
+        if (!this._heldRes) this._heldRes = new Set();
+        if (!this._heldRes.has(args[0]))
+          throw new Error("release: resource not held: " + args[0]);
+        this._heldRes.delete(args[0]);
+        return null;
+      }
+
       case "wait": {
         // Delay next message dispatch for this actor
         const ms = Number(args[0]) || 0;
@@ -1984,6 +2063,12 @@ export class Runtime {
             // AIOS / protocol builtins (shared with CallStmt)
             const ap = this._dispatchAiosProtocol(expr.name, args, env);
             if (ap.handled) return ap.value;
+            // 文として登録した組込み（is_ok / value / acquire など）は
+            // 式の位置からも呼べなければならない。ここへ落として拾う。
+            if (["is_ok", "timed_out", "value", "acquire", "release"]
+                  .includes(expr.name)) {
+              return this._callBuiltin(expr.name, args, env);
+            }
             throw new Error("Unknown function: " + expr.name);
           }
         }
@@ -1997,6 +2082,10 @@ export class Runtime {
         this.send(target, expr.method, args, false, senderName, slotId);
         if (!expr.deadline) return this.drainUntilSlot(slotId);
         const r = this.drainUntilSlotTimed(slotId, expr.deadline.ms);
+        // else を書かなければ result<τ>。成功したかどうかを値に持たせる。
+        if (expr.deadline.alt === null || expr.deadline.alt === undefined) {
+          return { __result: true, ok: r.ok, value: r.ok ? r.value : null };
+        }
         return r.ok ? r.value : this.evalExpr(expr.deadline.alt, env);
       }
 
@@ -2014,6 +2103,9 @@ export class Runtime {
         if (fut && typeof fut === "object" && fut.__future) {
           if (expr.deadline) {
             const r = this.drainUntilSlotTimed(fut.slotId, expr.deadline.ms);
+            if (expr.deadline.alt === null || expr.deadline.alt === undefined) {
+              return { __result: true, ok: r.ok, value: r.ok ? r.value : null };
+            }
             if (!r.ok) return this.evalExpr(expr.deadline.alt, env);
             if (fut._aios_meta) {
               this.protocolObserveAll(fut._aios_meta.alias, fut._aios_meta.method);
