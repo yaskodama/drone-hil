@@ -559,6 +559,58 @@ export class Runtime {
     if (ap.handled) return ap.value;
 
     switch (name) {
+      // ---- メッシュ配備 ----
+      case "source_of": {
+        const src = (this._unitSrc || {})[args[0]];
+        if (src === undefined) throw new Error("source_of: no source for class " + args[0]);
+        return src;
+      }
+      case "node_allow": {
+        if (!this._nodePolicy) this._nodePolicy = {};
+        this._nodePolicy[args[0]] =
+          new Set(String(args[1]).split(",").map(x => x.trim()).filter(Boolean));
+        return null;
+      }
+      case "deploy": {
+        const [node, cls, aname] = args;
+        const src = (this._unitSrc || {})[cls];
+        if (src === undefined) throw new Error("deploy: no source for class " + cls);
+        // --- 相手先での処理（JIT）。実機では Xinu ノード側になる ---
+        if (!this._parseUnit) throw new Error("deploy: no parser is wired in");
+        let prog;
+        try { prog = this._parseUnit(src); }
+        catch (e) { throw new Error("deploy: the shipped source does not parse at " + node); }
+        // 受け入れ方針の照合
+        const allowed = (this._nodePolicy || {})[node];
+        if (allowed) {
+          const need = new Set();
+          for (const c of (prog.classes || [])) {
+            if (c.name !== cls) continue;
+            for (const m of (c.methods || [])) for (const e of (m.eff || [])) need.add(e);
+          }
+          const over = [...need].filter(e => !allowed.has(e));
+          if (over.length) {
+            throw new Error(
+              `deploy: node ${node} does not accept effect(s) {${over.sort().join(", ")}} required by ${cls}`);
+          }
+        }
+        for (const c of (prog.classes || [])) this.classes.set(c.name, c);
+        const handle = `${node}/${aname}`;
+        this.createActor(handle, cls, []);
+        this.print(`[deploy] ${cls} -> ${handle} (compiled at destination)`);
+        return handle;
+      }
+
+      // ---- 返信先（reply destination）----
+      case "answer": {
+        const r = args[0];
+        if (!r || r.__replyto !== true) {
+          throw new Error("answer(r, v): a reply destination and a value are expected");
+        }
+        this.fulfillReplySlot(r.slotId, args[1]);
+        return null;
+      }
+
       // ---- result<τ> と資源（OCaml 版・Py-I と同じ組込み） ----
       case "is_ok": {
         const r = args[0];
@@ -1950,6 +2002,18 @@ export class Runtime {
         if (expr.name === "self" && env.__currentActor) {
           return env.__currentActor;
         }
+        // ★ replyto ---- いま処理しているメッセージの返信先を値にする。
+        //    持ち出した印を付けておかないと、メソッドが reply しないまま
+        //    終わった時点で解決されてしまい、委譲した先の answer が間に合わない。
+        if (expr.name === "replyto") {
+          const an = env.__currentActor;
+          const ac = an ? this.actors.get(an) : null;
+          if (!ac || !ac.__currentSlotId) {
+            throw new Error("replyto: no message is being handled");
+          }
+          ac.__replyDelegated = true;
+          return { __replyto: true, slotId: ac.__currentSlotId };
+        }
         if (expr.name in env) return env[expr.name];
         if (this.actors.has(expr.name)) return expr.name;
         throw new Error("Unknown var: " + expr.name);
@@ -2065,7 +2129,8 @@ export class Runtime {
             if (ap.handled) return ap.value;
             // 文として登録した組込み（is_ok / value / acquire など）は
             // 式の位置からも呼べなければならない。ここへ落として拾う。
-            if (["is_ok", "timed_out", "value", "acquire", "release"]
+            if (["answer", "is_ok", "timed_out", "value", "acquire", "release",
+                 "source_of", "node_allow", "deploy"]
                   .includes(expr.name)) {
               return this._callBuiltin(expr.name, args, env);
             }

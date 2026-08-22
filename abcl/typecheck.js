@@ -112,6 +112,9 @@ export function checkReplyAndDeadlines(ast, opts = {}) {
       const where = `method ${cls.name}.${m.name}`;
       const stmts = stmtsOf(m.body);
 
+      // replyto を使うメソッドでは、返信の義務は線形性の検査が担う。
+      // reply の回数・被覆の構文検査は適用しない（OCaml 版・Py-I と同じ）。
+      if (usesReplyto(m.body)) continue;
       const n = maxReplies(stmts);
       if (n >= 2) {
         out.push({ where, severity: "error",
@@ -399,4 +402,114 @@ export function checkWaitCycle(ast) {
   for (const k of Object.keys(succ)) if (!found.length) dfs([], k);
   if (!found.length) return [];
   return [`循環待ち: ${found[0].join(" -> ")}（now/await の閉路。期限が無ければ確実に詰まる）`];
+}
+
+// 本体のどこかで replyto を使っているか。
+function usesReplyto(n) {
+  if (!n || typeof n !== "object") return false;
+  if (n.type === "Var" && n.name === "replyto") return true;
+  for (const k of Object.keys(n)) {
+    const v = n[k];
+    if (Array.isArray(v)) { if (v.some(usesReplyto)) return true; }
+    else if (v && typeof v === "object") { if (usesReplyto(v)) return true; }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------
+// 返信先の線形性。replyto で取り出した義務は、ちょうど一度 answer するか、
+// 送信の引数に渡して相手へ移す。状態は (owed, spent) の対で持つ ----
+// 消すだけだと二度渡しがただの変数参照に見えて素通りする。
+// OCaml 版 infer.ml の check_reply_linearity と同じ規律。
+// ---------------------------------------------------------------------
+export function checkReplyLinearity(ast) {
+  const issues = [];
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const where = `method ${cls.name}.${md.name}`;
+      const say = (m) => issues.push(`${where}: ${m}`);
+      const eq = (a, b) => a.size === b.size && [...a].every(x => b.has(x));
+
+      const expr = (e, st) => {
+        if (!e || typeof e !== "object") return st;
+        let [owed, spent] = st;
+        if ((e.type === "CallExpr" || e.type === "CallStmt") && e.name === "answer") {
+          const a0 = (e.args || [])[0];
+          if (a0 && a0.type === "Var") {
+            if (spent.has(a0.name)) { say(`返信先 ${a0.name} を二度使っている`); return st; }
+            if (a0.name !== "replyto" && !owed.has(a0.name)) {
+              say(`返信先 ${a0.name} は replyto から取り出されていない`); return st;
+            }
+            if (a0.name !== "replyto") {
+              const o = new Set(owed), p = new Set(spent);
+              o.delete(a0.name); p.add(a0.name);
+              return [o, p];
+            }
+          }
+          return st;
+        }
+        if (e.type === "Send" || e.type === "Now" || e.type === "Future") {
+          for (const a of (e.args || [])) {
+            if (a && a.type === "Var") {
+              if (spent.has(a.name)) say(`返信先 ${a.name} を二度使っている`);
+              else if (owed.has(a.name)) {
+                const o = new Set(owed), p = new Set(spent);
+                o.delete(a.name); p.add(a.name);
+                owed = o; spent = p;
+              }
+            } else { [owed, spent] = expr(a, [owed, spent]); }
+          }
+          return [owed, spent];
+        }
+        for (const k of Object.keys(e)) {
+          const v = e[k];
+          if (Array.isArray(v)) for (const x of v) [owed, spent] = expr(x, [owed, spent]);
+          else if (v && typeof v === "object") [owed, spent] = expr(v, [owed, spent]);
+        }
+        return [owed, spent];
+      };
+
+      const stmt = (n, st) => {
+        if (!n || typeof n !== "object") return st;
+        switch (n.type) {
+          case "VarDecl":
+            if (n.expr && n.expr.type === "Var" && n.expr.name === "replyto") {
+              const o = new Set(st[0]); o.add(n.name);
+              return [o, st[1]];
+            }
+            return expr(n.expr, st);
+          case "Seq": {
+            let cur = st;
+            for (const x of (n.statements || [])) cur = stmt(x, cur);
+            return cur;
+          }
+          case "If": {
+            const s0 = expr(n.cond, st);
+            const a = stmt(n.thenBody, s0);
+            const b = n.elseBody ? stmt(n.elseBody, s0) : s0;
+            if (!eq(a[0], b[0])) say("二つの枝で果たしていない返信先が食い違う");
+            return a;
+          }
+          case "While": {
+            const s0 = expr(n.cond, st);
+            const sb = stmt(n.body, s0);
+            if (!eq(sb[0], s0[0])) say("ループの本体は返信の義務を変えてはならない");
+            return s0;
+          }
+          default:
+            return expr(n, st);
+        }
+      };
+
+      const start = new Set();
+      (md.params || []).forEach((p, i) => {
+        if (md.paramTypes && md.paramTypes[i] === "reply") start.add(p);
+      });
+      const [owed] = stmt(md.body, [start, new Set()]);
+      if (owed.size) {
+        say(`返信先 ${[...owed].sort().join(", ")} に答えないままメソッドを抜けている`);
+      }
+    }
+  }
+  return issues;
 }

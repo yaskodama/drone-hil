@@ -19,6 +19,7 @@
 "print"      return 'PRINT';
 "reply"      return 'REPLY';
 "new"        return 'NEW';
+"remote"     return 'REMOTE';
 "select"     return 'SELECT';
 "case"       return 'CASE';
 "timeout"    return 'TIMEOUT';
@@ -169,6 +170,8 @@ params
 param
   : IDENT             { $$ = { name: $1, ty: null }; }
   | IDENT ':' IDENT   { $$ = { name: $1, ty: $3 }; }
+  /* reply は字句の段階で REPLY になるので、型注釈としては別に受ける */
+  | IDENT ':' REPLY   { $$ = { name: $1, ty: "reply" }; }
   ;
 
 stmts
@@ -185,6 +188,10 @@ stmt
   | IDENT '=' expr ';'                           { $$ = yy.Assign($1, $3); }
   | IDENT dim_list '=' expr ';'                  { $$ = yy.IndexAssign($1, $2, $4); }
   | SEND IDENT '.' IDENT '(' args ')' ';'        { $$ = yy.Send($2, $4, $6, false); }
+  /* メッシュの他ノードへ送る。宛先は "ノード/アクター" に解決する。 */
+  | SEND REMOTE '(' STRING ',' STRING ')' '.' IDENT '(' args ')' ';'
+      { $$ = yy.Send(yy.unescapeString($4.slice(1,-1)) + "/" +
+                     yy.unescapeString($6.slice(1,-1)), $9, $11, false); }
   | UNSAFESEND IDENT '.' IDENT '(' args ')' ';'  { $$ = yy.Send($2, $4, $6, true); }
   | PRINT '(' expr ')' ';'                       { $$ = yy.Print($3); }
   | REPLY '(' expr ')' ';'                       { $$ = yy.Reply($3); }
