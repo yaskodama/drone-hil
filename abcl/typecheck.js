@@ -584,6 +584,45 @@ export function checkReplyTotality(ast) {
 // level(b) <= level(a) なら b を押し上げる、を不動点まで繰り返す。
 // 明示注釈は固定点で、押し上げが要るのに動かせなければそこが矛盾。
 // これで片方にしか注釈が無い辺も検査できる。
+// node_level("n", k) を読む。宛先の実体は別ノードにあり静的に見えないので、
+// ノード単位の階層で近似する。
+function nodeFloorsOf(ast) {
+  const floors = {};
+  for (const st of (ast.statements || ast.stmts || [])) {
+    if (st && st.type === "CallStmt" && st.name === "node_level") {
+      const a = st.args || [];
+      if (a.length === 2 && a[0].type === "StringLit" && a[1].type === "IntLit") {
+        floors[a[0].value] = a[1].value;
+      }
+    }
+  }
+  return floors;
+}
+
+// 遠隔への待ち。remote("node","actor") は宛先名が "node/actor" になる。
+function remoteWaitsOf(ast) {
+  const out = [];
+  for (const cls of (ast.classes || [])) {
+    for (const md of (cls.methods || [])) {
+      const from = `${cls.name}.${md.name}`;
+      const walk = (n) => {
+        if (!n || typeof n !== "object") return;
+        if ((n.type === "Now" || n.type === "Future") && typeof n.target === "string"
+            && n.target.includes("/")) {
+          out.push([from, n.target.split("/")[0]]);
+        }
+        for (const k of Object.keys(n)) {
+          const v = n[k];
+          if (Array.isArray(v)) v.forEach(walk);
+          else if (v && typeof v === "object") walk(v);
+        }
+      };
+      walk(md.body);
+    }
+  }
+  return out;
+}
+
 export function checkLevels(ast) {
   const issues = [], lv = {}, fixed = new Set();
   for (const cls of (ast.classes || [])) {
@@ -615,6 +654,14 @@ export function checkLevels(ast) {
   if (!converged) {
     issues.push("義務レベルが収束しない（待ちのグラフに閉路がある）");
     return issues;
+  }
+  const floors = nodeFloorsOf(ast);
+  for (const [caller, node] of remoteWaitsOf(ast)) {
+    if (node in floors && floors[node] <= (lv[caller] || 0)) {
+      issues.push(`義務レベル: ${caller} (@${lv[caller] || 0}) が ノード ${node}` +
+                  `（下限 @${floors[node]}）を待っている` +
+                  `（ノードをまたぐ待ちは上へ向かわなければならない）`);
+    }
   }
   if (typeof process !== "undefined" && process.env?.AIOS_SHOW_LEVELS === "1") {
     for (const [k, v] of Object.entries(lv).sort((x, y) => x[1] - y[1])) {

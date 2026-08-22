@@ -276,6 +276,15 @@ expr
   | FALSE                     { $$ = yy.BoolLit(false); }
   | NOW IDENT '.' IDENT '(' args ')' TIMEOUT INT ELSE expr
       { $$ = yy.Now($2, $4, $6, { ms: Number($9), alt: $11 }); }
+  /* メッシュの他ノードへの now。宛先は "ノード/アクター" に解決する。 */
+  | NOW REMOTE '(' STRING ',' STRING ')' '.' IDENT '(' args ')' TIMEOUT INT ELSE expr
+      { $$ = yy.Now(yy.unescapeString($4.slice(1,-1)) + "/" +
+                    yy.unescapeString($6.slice(1,-1)), $9, $11,
+                    { ms: Number($14), alt: $16 }); }
+  | NOW REMOTE '(' STRING ',' STRING ')' '.' IDENT '(' args ')' TIMEOUT INT
+      { $$ = yy.Now(yy.unescapeString($4.slice(1,-1)) + "/" +
+                    yy.unescapeString($6.slice(1,-1)), $9, $11,
+                    { ms: Number($14), alt: null }); }
   /* else を書かない形。値は result<τ> になり、成功したかどうかを型で持つ。 */
   | NOW IDENT '.' IDENT '(' args ')' TIMEOUT INT
       { $$ = yy.Now($2, $4, $6, { ms: Number($9), alt: null }); }
