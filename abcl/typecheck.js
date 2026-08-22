@@ -906,29 +906,89 @@ function parseProtoSpec(spec) {
   return out;
 }
 
-function sendsOfNode(n, acc) {
-  if (!n || typeof n !== "object") return;
-  if (n.type === "Send" || n.type === "Now" || n.type === "Future") {
-    for (const a of (n.args || [])) sendsOfNode(a, acc);
-    const t = (typeof n.target === "string") ? n.target
-            : (n.target && n.target.name) ? n.target.name : null;
-    if (t && n.method) acc.push([t, n.method]);
-    return;
+// 宛先の解決表。手順は "main_thread.run" のようにアクターの変数名で書かれるが、
+// 送信は aios_now("main", "run", ...) のようにサービス名で書かれる。
+// 両者は aios_register_service("main", "main_thread") で結ばれる。
+function buildProtoTables(ast) {
+  const svcActor = {}, varClass = {}, fieldClass = {}, methodsOf = {};
+  for (const cls of (ast.classes || [])) {
+    for (const f of (cls.fields || []))
+      if (f.expr && f.expr.type === "NewExpr")
+        fieldClass[cls.name + "\u0000" + f.name] = f.expr.className;
+    for (const md of (cls.methods || []))
+      methodsOf[cls.name + "\u0000" + md.name] = md;
   }
-  if ((n.type === "CallExpr" || n.type === "CallStmt") &&
-      ["aios_now", "aios_send", "remote_now"].includes(n.name)) {
-    const a = n.args || [];
-    if (a.length >= 2 && a[0].type === "StringLit" && a[1].type === "StringLit") {
-      for (const x of a.slice(2)) sendsOfNode(x, acc);
-      acc.push([a[0].value, a[1].value]);
-      return;
+  for (const st of (ast.statements || ast.stmts || [])) {
+    if (!st || typeof st !== "object") continue;
+    if (st.type === "VarDecl" && st.expr && st.expr.type === "NewExpr")
+      varClass[st.name] = st.expr.className;
+    else if (st.type === "CallStmt" && st.name === "aios_register_service") {
+      const a = st.args || [];
+      if (a.length === 2 && a[0].type === "StringLit" && a[1].type === "StringLit")
+        svcActor[a[0].value] = a[1].value;
     }
   }
-  for (const k of Object.keys(n)) {
-    const v = n[k];
-    if (Array.isArray(v)) v.forEach(x => sendsOfNode(x, acc));
-    else if (v && typeof v === "object") sendsOfNode(v, acc);
+  return { svcActor, varClass, fieldClass, methodsOf };
+}
+
+// 送信を (宛先アクター, メソッド) の順に取り出す。
+//
+// ここが「振る舞い展開」である。同期の送信（now / aios_now）は、呼び先の本体が
+// 呼び出し側の続きより先に走り切るので、その送信列をその場に差し込んでよい。
+// これでセッションがアクターをまたいでも、送信の順序が一本に並ぶ。
+// 非同期（send / future）は差し込まない ---- いつ走るか決まらないからである。
+function makeSendsOf(T, state) {
+  const classOf = (cls, params, a) => {
+    if (params && a in params) return params[a];
+    if (cls && (cls + "\u0000" + a) in T.fieldClass) return T.fieldClass[cls + "\u0000" + a];
+    return T.varClass[a];
+  };
+  const isStep = (a, m) => state.steps.some(([x, y]) => x === a && y === m);
+
+  function expand(vis, cls, params, target, m, sync, acc) {
+    const a = T.svcActor[target] || target;
+    acc.push([a, m]);
+    const c = classOf(cls, params, a);
+    const md = c ? T.methodsOf[c + "\u0000" + m] : null;
+    if (!md) { if (isStep(a, m)) state.unsequenced = true; return; }
+    if (vis.includes(c + "\u0000" + m)) return;      // 再帰は一度で止める
+    const sub = Object.assign({}, params);
+    (md.params || []).forEach((nm, i) => {
+      const ann = md.paramTypes && md.paramTypes[i];
+      if (ann && /^[A-Z]/.test(ann)) sub[nm] = ann; else delete sub[nm];
+    });
+    const inner = [];
+    sendsOfNode(md.body, inner, vis.concat([c + "\u0000" + m]), c, sub);
+    if (sync) acc.push(...inner);
+    else if (inner.some(([x, y]) => isStep(x, y))) state.unsequenced = true;
   }
+
+  function sendsOfNode(n, acc, vis = [], cls = null, params = null) {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "Send" || n.type === "Now" || n.type === "Future") {
+      for (const a of (n.args || [])) sendsOfNode(a, acc, vis, cls, params);
+      const t = (typeof n.target === "string") ? n.target
+              : (n.target && n.target.name) ? n.target.name : null;
+      if (t && n.method) expand(vis, cls, params, t, n.method, n.type === "Now", acc);
+      return;
+    }
+    if ((n.type === "CallExpr" || n.type === "CallStmt") &&
+        ["aios_now", "aios_send", "aios_future", "remote_now"].includes(n.name)) {
+      const a = n.args || [];
+      if (a.length >= 2 && a[0].type === "StringLit" && a[1].type === "StringLit") {
+        for (const x of a.slice(2)) sendsOfNode(x, acc, vis, cls, params);
+        expand(vis, cls, params, a[0].value, a[1].value,
+               n.name === "aios_now" || n.name === "remote_now", acc);
+        return;
+      }
+    }
+    for (const k of Object.keys(n)) {
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(x => sendsOfNode(x, acc, vis, cls, params));
+      else if (v && typeof v === "object") sendsOfNode(v, acc, vis, cls, params);
+    }
+  }
+  return sendsOfNode;
 }
 
 export function checkProtocols(ast) {
@@ -945,9 +1005,14 @@ export function checkProtocols(ast) {
   }
   if (!Object.keys(defs).length) return issues;
 
-  const top = [];
-  for (const st of stmts) sendsOfNode(st, top);
-  const inTop = (s) => top.some(([a, m]) => a === s[0] && m === s[1]);
+  // 送信列を一度全部展開して、静的に並べきれたかを見る。
+  // 並べきれたなら、セッションがアクターをまたいでいても
+  // 「やり残し」を誤りと言ってよい。
+  const state = { unsequenced: false,
+                  steps: Object.values(defs).flat() };
+  const sendsOfNode = makeSendsOf(buildProtoTables(ast), state);
+  for (const st of stmts) sendsOfNode(st, []);
+  const sequenced = !state.unsequenced;
 
   const strict = typeof process !== "undefined" &&
                  process.env?.AIOS_STRICT_PROTOCOL === "1";
@@ -964,7 +1029,7 @@ export function checkProtocols(ast) {
     }
     if (started !== null) {
       if (!(started in defs)) issues.push(`protocol_start: 未知のプロトコル ${started}`);
-      else { active = started; cur = defs[started].slice(); full = defs[started].every(inTop); }
+      else { active = started; cur = defs[started].slice(); full = sequenced; }
       continue;
     }
     if (st.type === "CallStmt" && st.name === "protocol_end") {
