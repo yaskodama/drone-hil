@@ -1,0 +1,341 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Py-I — AIPL actors</title>
+<style>
+ body{font-family:ui-monospace,Menlo,Consolas,monospace;background:#0b0f14;color:#d8dee9;margin:0;padding:16px}
+ h1{color:#88c0d0;font-size:18px;margin:0 0 6px} h2{color:#a3be8c;font-size:14px;margin:18px 0 6px}
+ .meta{color:#7a8a99;font-size:12px;margin-bottom:8px}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{border:1px solid #2a3340;padding:4px 8px;text-align:left;vertical-align:top}
+ th{background:#1a2430;color:#88c0d0;position:sticky;top:0}
+ td.busy{color:#ebcb8b;font-weight:bold} td.idle{color:#7a8a99} td.stopped{color:#bf616a}
+ .fields{color:#8fbcbb;white-space:pre-wrap}
+ pre{background:#11161d;border:1px solid #2a3340;padding:10px;overflow:auto;max-height:340px;font-size:12px;color:#cdd6e0}
+ .cls{color:#b48ead}
+ .bar{margin:8px 0 4px} button{font-family:inherit;font-size:13px;padding:6px 14px;margin-right:8px;
+   border:1px solid #3b4757;border-radius:5px;background:#1a2430;color:#d8dee9;cursor:pointer}
+ button:hover{background:#243042} #b_start{border-color:#a3be8c} #b_pause{border-color:#ebcb8b}
+ #b_resume{border-color:#88c0d0} #b_stop{border-color:#bf616a}
+ #runstate{font-weight:bold;margin-left:8px} .running{color:#a3be8c} .paused{color:#ebcb8b}
+ .stopped{color:#bf616a} .notstarted{color:#7a8a99}
+</style></head><body>
+<h1>Py-I &mdash; AIPL interpreter (live)</h1>
+<div class="bar">
+ <label for="progsel">Program:</label>
+ <select id="progsel" style="font-family:inherit;font-size:13px;padding:5px;background:#11161d;color:#d8dee9;border:1px solid #3b4757;border-radius:5px;min-width:340px"></select>
+ <button id="b_switch" onclick="switchProgram()" style="border-color:#b48ead">Switch / Load</button>
+</div>
+<div class="bar">
+ <button id="b_start" onclick="ctl('start')">&#9654; Start</button>
+ <button id="b_pause" onclick="ctl('pause')">&#10073;&#10073; Suspend</button>
+ <button id="b_resume" onclick="ctl('resume')">&#8635; Resume</button>
+ <button id="b_stop" onclick="ctl('stop')">&#9632; End</button>
+ <span id="runstate" class="notstarted">not started</span>
+</div>
+<div class="meta">program: <span id="path">(loading)</span> &nbsp;|&nbsp; actors: <b id="count">0</b>
+ &nbsp;|&nbsp; classes: <span id="classes" class="cls"></span> &nbsp;|&nbsp; updated <span id="ts"></span></div>
+<h2>Visualization</h2>
+<canvas id="viz" width="760" height="360"
+  style="background:#0b0f14;border:1px solid #2a3340;border-radius:6px;display:block;max-width:100%"></canvas>
+<div style="color:#7a8a99;font-size:11px;margin:4px 0 0">
+  philosophers around the ring (blue=thinking, amber=hungry/waiting, green=eating,
+  grey=done/stopped); forks shown between them, with a green arrow pointing to
+  the philosopher currently holding the fork.
+  Remote programs only show the local (Mac) actors here.
+</div>
+<div id="speedctl" style="display:none;margin:8px 0 0;padding:8px 10px;background:#11161d;border:1px solid #2a3340;border-radius:6px;max-width:760px">
+  <div style="color:#cdd6e0;font-size:12px;margin-bottom:6px">Bounded-buffer speed &mdash; drag to retune the running actors (left = faster, right = slower)</div>
+  <label style="display:flex;align-items:center;gap:8px;color:#81a1c1;font-size:12px;margin:3px 0">
+    <span style="width:120px">Producer interval</span>
+    <input id="pspeed" type="range" min="50" max="2000" step="10" value="300" oninput="pushSpeed()" style="flex:1">
+    <span id="pspeedv" style="width:58px;text-align:right">300 ms</span>
+  </label>
+  <label style="display:flex;align-items:center;gap:8px;color:#a3be8c;font-size:12px;margin:3px 0">
+    <span style="width:120px">Consumer interval</span>
+    <input id="cspeed" type="range" min="50" max="2000" step="10" value="500" oninput="pushSpeed()" style="flex:1">
+    <span id="cspeedv" style="width:58px;text-align:right">500 ms</span>
+  </label>
+</div>
+<h2>Running actors</h2>
+<table><thead><tr><th>name</th><th>class</th><th>state</th><th>mailbox</th><th>thread</th><th>fields (state)</th></tr></thead>
+<tbody id="abody"><tr><td colspan="5">(loading)</td></tr></tbody></table>
+<h2>Console &mdash; print() output</h2>
+<pre id="console" style="max-height:300px;color:#40ff80">(waiting for output...)</pre>
+<h2>Current program</h2>
+<pre id="src">(loading)</pre>
+<script>
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+async function loadProg(){
+ try{ const p=await (await fetch('/api/program')).json();
+  document.getElementById('path').textContent=p.path||'(inline)';
+  document.getElementById('classes').textContent=(p.classes||[]).map(c=>c.name).join(', ')||'(none)';
+  document.getElementById('src').textContent=p.source||'(source unavailable)';
+ }catch(e){}
+}
+function setState(paused,stopped,started){
+ const el=document.getElementById('runstate');
+ let s,cls;
+ if(started===false){s='not started';cls='notstarted';}
+ else if(stopped){s='ended';cls='stopped';}
+ else if(paused){s='paused';cls='paused';}
+ else {s='running';cls='running';}
+ el.textContent=s; el.className=cls;
+}
+async function ctl(action){
+ const body={action};
+ if(action==='start'){ const sel=document.getElementById('progsel');
+   if(sel&&sel.value) body.program=sel.value;
+   conSince=0; document.getElementById('console').textContent=''; }
+ try{ const r=await fetch('/api/control',{method:'POST',
+       headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json(); setState(d.paused,d.stopped,d.started);
+  if(action==='start'){ setTimeout(tick,400); setTimeout(loadProg,500); setTimeout(pushSpeed,800); }
+ }catch(e){}
+}
+async function pushSpeed(){
+ const pe=document.getElementById('pspeed'), ce=document.getElementById('cspeed');
+ if(!pe||!ce) return;
+ const p=+pe.value, c=+ce.value;
+ document.getElementById('pspeedv').textContent=p+' ms';
+ document.getElementById('cspeedv').textContent=c+' ms';
+ try{ await fetch('/api/speed',{method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({produce_ms:p,consume_ms:c})}); }catch(e){}
+}
+function philColor(p){
+ const f=p.fields||{}; const st=String(f.status||'').toLowerCase();
+ if(p.state==='stopped'||st.indexOf('done')>=0||st.indexOf('terminat')>=0) return '#7a8a99';
+ if(st.indexOf('eat')>=0) return '#a3be8c';
+ if(st.indexOf('wait')>=0||st.indexOf('took')>=0||st.indexOf('fork')>=0) return '#ebcb8b';
+ if(st.indexOf('think')>=0) return '#81a1c1';
+ return p.state==='busy' ? '#ebcb8b' : '#81a1c1';
+}
+function drawArrow(ctx,x1,y1,x2,y2,color){
+ const dx=x2-x1, dy=y2-y1, len=Math.hypot(dx,dy); if(len<1) return;
+ const ux=dx/len, uy=dy/len;
+ const sx=x1+ux*9, sy=y1+uy*9;       // start just outside the fork marker
+ const ex=x2-ux*24, ey=y2-uy*24;      // stop at the philosopher node edge
+ ctx.strokeStyle=color; ctx.fillStyle=color; ctx.lineWidth=2.5;
+ ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
+ const ah=9, aa=Math.atan2(ey-sy,ex-sx);
+ ctx.beginPath(); ctx.moveTo(ex,ey);
+ ctx.lineTo(ex-ah*Math.cos(aa-0.45), ey-ah*Math.sin(aa-0.45));
+ ctx.lineTo(ex-ah*Math.cos(aa+0.45), ey-ah*Math.sin(aa+0.45));
+ ctx.closePath(); ctx.fill();
+}
+// ── bounded-buffer view ───────────────────────────────────────────────
+// Producers on the left, consumers on the right, the buffer's ring of
+// slots in the middle (filled boxes = live items, drained from `head`).
+function pcColor(a){
+ const f=a.fields||{}; const st=String(f.status||'').toLowerCase();
+ if(a.state==='stopped'||st.indexOf('done')>=0||st.indexOf('terminat')>=0) return '#7a8a99';
+ if(st.indexOf('block')>=0||st.indexOf('wait')>=0||st.indexOf('full')>=0||st.indexOf('empty')>=0) return '#ebcb8b';
+ return '#81a1c1';   // producing / consuming
+}
+function flowArrow(ctx,x1,y1,x2,y2,color){
+ ctx.strokeStyle=color; ctx.fillStyle=color; ctx.lineWidth=2;
+ ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+ const mx=(x1+x2)/2, my=(y1+y2)/2, a=Math.atan2(y2-y1,x2-x1), ah=7;
+ ctx.beginPath(); ctx.moveTo(mx,my);
+ ctx.lineTo(mx-ah*Math.cos(a-0.5), my-ah*Math.sin(a-0.5));
+ ctx.lineTo(mx-ah*Math.cos(a+0.5), my-ah*Math.sin(a+0.5));
+ ctx.closePath(); ctx.fill();
+}
+function drawBuffer(ctx,W,H,actors,buf){
+ const cx=W/2, cy=H/2;
+ const prods=actors.filter(a=>a['class']==='Producer');
+ const cons =actors.filter(a=>a['class']==='Consumer');
+ const bf=buf.fields||{};
+ const cap=Number(bf.cap)||5, count=Number(bf.count)||0;
+ const head=Number(bf.head)||0, tail=Number(bf.tail)||0;
+ const slots=Array.isArray(bf.slots)?bf.slots:[];
+ const occ=new Array(cap).fill(false);
+ for(let k=0;k<count;k++) occ[((head+k)%cap+cap)%cap]=true;
+ const hIdx=((head%cap)+cap)%cap, tIdx=((tail%cap)+cap)%cap;
+ const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+ // buffer as a single wide row spanning the canvas; producers feed it from
+ // above, consumers drain it below.
+ const margin=16, gap=4;
+ const bw=Math.max(12, Math.min(46, Math.floor((W-2*margin-(cap-1)*gap)/cap)));
+ const bh=40;
+ const rowW=cap*bw+(cap-1)*gap, gx=cx-rowW/2, gy=cy-bh/2;
+ ctx.textAlign='center';
+ ctx.fillStyle='#cdd6e0'; ctx.font='12px monospace';
+ ctx.fillText('bounded buffer   '+count+'/'+cap+'   head='+hIdx+'   tail='+tIdx, cx, gy-12);
+ for(let i=0;i<cap;i++){
+  const bx=gx+i*(bw+gap);
+  ctx.fillStyle=occ[i]?'#2e4b2e':'#11161d'; ctx.fillRect(bx,gy,bw,bh);
+  ctx.lineWidth=2;
+  ctx.strokeStyle = (i===hIdx)?'#88c0d0' : (i===tIdx)?'#d08770' : (occ[i]?'#a3be8c':'#2a3340');
+  ctx.strokeRect(bx,gy,bw,bh);
+  if(occ[i] && slots[i]!==undefined && bw>=18){
+   ctx.fillStyle='#e5e9f0'; ctx.font=(bw>=28?'12px':'9px')+' monospace'; ctx.textBaseline='middle';
+   ctx.fillText(String(slots[i]), bx+bw/2, gy+bh/2); ctx.textBaseline='alphabetic';
+  }
+ }
+ ctx.font='10px monospace'; ctx.fillStyle='#88c0d0'; ctx.textAlign='center';
+ ctx.fillText('head = next read (cyan)', cx-90, gy+bh+16);
+ ctx.fillStyle='#d08770'; ctx.fillText('tail = next write (orange)', cx+90, gy+bh+16);
+ // producers across the top, consumers across the bottom
+ const placeRow=(list,y,x0,x1)=>{
+  const n=list.length; if(!n) return [];
+  if(n===1) return [{a:list[0],x:(x0+x1)/2,y}];
+  return list.map((a,i)=>({a,x:x0+(x1-x0)*i/(n-1),y}));
+ };
+ const xspread=Math.min(140, cx-40);
+ const P=placeRow(prods, gy-72, cx-xspread, cx+xspread);
+ const C=placeRow(cons,  gy+bh+72, cx-xspread, cx+xspread);
+ P.forEach(o=>flowArrow(ctx,o.x,o.y+20, clamp(o.x,gx+bw/2,gx+rowW-bw/2),gy-5, pcColor(o.a)));
+ C.forEach(o=>flowArrow(ctx, clamp(o.x,gx+bw/2,gx+rowW-bw/2),gy+bh+5, o.x,o.y-20, pcColor(o.a)));
+ const node=(o,prefix,sub)=>{
+  const f=o.a.fields||{};
+  ctx.beginPath(); ctx.arc(o.x,o.y,20,0,2*Math.PI);
+  ctx.fillStyle=pcColor(o.a); ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle='#0b0f14'; ctx.stroke();
+  ctx.fillStyle='#0b0f14'; ctx.font='bold 11px monospace'; ctx.textAlign='center';
+  ctx.fillText(prefix+(f.id!==undefined?f.id:''), o.x, o.y+1);
+  ctx.fillStyle='#cdd6e0'; ctx.font='10px monospace';
+  const s=sub(f); if(s) ctx.fillText(s, o.x, o.y-28);
+  const lbl=String(f.status||''); if(lbl){ ctx.fillStyle='#8fbcbb'; ctx.font='9px monospace';
+   ctx.fillText(lbl.slice(0,20), o.x, o.y-40); }
+ };
+ P.forEach(o=>node(o,'P',f=>(f.made!==undefined?('made '+f.made+(f.target!==undefined?'/'+f.target:'')):'')));
+ // consumer sub-label sits below its node (room there); status above.
+ const cnode=(o)=>{
+  const f=o.a.fields||{};
+  ctx.beginPath(); ctx.arc(o.x,o.y,20,0,2*Math.PI);
+  ctx.fillStyle=pcColor(o.a); ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle='#0b0f14'; ctx.stroke();
+  ctx.fillStyle='#0b0f14'; ctx.font='bold 11px monospace'; ctx.textAlign='center';
+  ctx.fillText('C'+(f.id!==undefined?f.id:''), o.x, o.y+1);
+  ctx.fillStyle='#cdd6e0'; ctx.font='10px monospace';
+  if(f.got!==undefined) ctx.fillText('got '+f.got, o.x, o.y+33);
+  const lbl=String(f.status||''); if(lbl){ ctx.fillStyle='#8fbcbb'; ctx.font='9px monospace';
+   ctx.fillText(lbl.slice(0,20), o.x, o.y+45); }
+ };
+ C.forEach(cnode);
+ ctx.fillStyle='#7a8a99'; ctx.font='11px monospace'; ctx.textAlign='center';
+ ctx.fillText('producers', cx, 14); ctx.fillText('consumers', cx, H-6);
+}
+function drawViz(actors){
+ const cv=document.getElementById('viz'); if(!cv) return;
+ const ctx=cv.getContext('2d'); const W=cv.width,H=cv.height;
+ ctx.clearRect(0,0,W,H);
+ const bufs=actors.filter(a=>a['class']==='Buffer');
+ if(bufs.length){ drawBuffer(ctx,W,H,actors,bufs[0]); return; }
+ const phils=actors.filter(a=>a['class']==='Philosopher'||a['class']==='Node');
+ const forks=actors.filter(a=>a['class']==='Fork');
+ const cx=W/2, cy=H/2, R=Math.min(W,H)*0.33;
+ const n=phils.length||1;
+ // pass 1: philosopher positions, indexed by their pid (id / my_id) so a held
+ // fork can draw an arrow to its holder.
+ const posById={};
+ const philData=phils.map((p,i)=>{
+  const ang=(i/n)*2*Math.PI - Math.PI/2;
+  const px=cx+Math.cos(ang)*R, py=cy+Math.sin(ang)*R;
+  const f=p.fields||{};
+  const pid=(f.id!==undefined)?f.id:f.my_id;
+  if(pid!==undefined && pid!==null) posById[pid]={x:px,y:py};
+  return {p:p, px:px, py:py};
+ });
+ // each fork sits BETWEEN the two philosophers that actually use it (their
+ // lo/hi reference it), so it's drawn adjacent to its real neighbours.
+ const forkUsers={};
+ philData.forEach(({p,px,py})=>{
+  const f=p.fields||{};
+  [f.lo,f.hi].forEach(ref=>{
+   if(ref===undefined||ref===null) return;
+   let nm=String(ref); const m=nm.match(/<actor (.+)>/); if(m) nm=m[1];
+   (forkUsers[nm]=forkUsers[nm]||[]).push({x:px,y:py});
+  });
+ });
+ const nf=forks.length;
+ forks.forEach((fk,i)=>{
+  let fx,fy;
+  const u=forkUsers[fk.name];
+  if(u && u.length){              // midpoint of its users, projected onto ring
+   let mx=0,my=0; u.forEach(q=>{mx+=q.x;my+=q.y;}); mx/=u.length; my/=u.length;
+   const a=Math.atan2(my-cy,mx-cx); fx=cx+Math.cos(a)*R; fy=cy+Math.sin(a)*R;
+  }else{                          // fallback when users are unknown (remote)
+   const a=(i/Math.max(nf,1))*2*Math.PI - Math.PI/2 - Math.PI/Math.max(nf,1);
+   fx=cx+Math.cos(a)*R; fy=cy+Math.sin(a)*R;
+  }
+  const h=(fk.fields||{}).holder||0;
+  if(h && h!==0 && posById[h]) drawArrow(ctx,fx,fy,posById[h].x,posById[h].y,'#a3be8c');
+  const tang=Math.atan2(fy-cy,fx-cx);
+  ctx.fillStyle=(h&&h!==0)?'#a3be8c':'#46505e';
+  ctx.save(); ctx.translate(fx,fy); ctx.rotate(tang+Math.PI/2);
+  ctx.fillRect(-3,-11,6,22); ctx.restore();
+  ctx.fillStyle='#cdd6e0'; ctx.font='10px monospace'; ctx.textAlign='center';
+  ctx.fillText(fk.name+(h?(' -> P'+h):''), fx, fy-14);
+ });
+ // pass 3: philosopher nodes on top.
+ philData.forEach(({p,px,py})=>{
+  ctx.beginPath(); ctx.arc(px,py,22,0,2*Math.PI);
+  ctx.fillStyle=philColor(p); ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle='#0b0f14'; ctx.stroke();
+  ctx.fillStyle='#0b0f14'; ctx.font='bold 12px monospace'; ctx.textAlign='center';
+  ctx.fillText(p.name, px, py+1);
+  const f=p.fields||{};
+  const meals=(f.meals!==undefined)?f.meals:((f.meals_done!==undefined)?f.meals_done:((f.hops!==undefined)?f.hops:''));
+  const tgt=(f.target!==undefined)?f.target:((f.meals_target!==undefined)?f.meals_target:'');
+  ctx.fillStyle='#cdd6e0'; ctx.font='11px monospace';
+  if(meals!=='') ctx.fillText('meal '+meals+(tgt!==''?('/'+tgt):''), px, py+38);
+  const lbl=String(f.status||p.state||'');
+  if(lbl){ ctx.fillStyle='#8fbcbb'; ctx.font='10px monospace'; ctx.fillText(lbl.slice(0,22), px, py+52); }
+ });
+ if(phils.length===0){ ctx.fillStyle='#7a8a99'; ctx.font='13px monospace'; ctx.textAlign='center';
+   ctx.fillText('(no philosopher actors - press Start)', cx, cy); }
+}
+async function tick(){
+ try{ const a=await (await fetch('/api/actors')).json();
+  document.getElementById('count').textContent=a.actors.length;
+  document.getElementById('ts').textContent=new Date().toLocaleTimeString();
+  setState(a.paused,a.stopped,a.started);
+  drawViz(a.actors);
+  const isBuf=a.actors.some(x=>x['class']==='Buffer'||x['class']==='Producer'||x['class']==='Consumer');
+  const sc=document.getElementById('speedctl'); if(sc) sc.style.display=isBuf?'block':'none';
+  const rows=a.actors.map(x=>{
+   const f=Object.entries(x.fields||{}).map(([k,v])=>k+'='+esc(JSON.stringify(v))).join('   ');
+   const th=(x.alive!==false&&x.thread!=null)?('#'+x.thread):'(dead)';
+   return '<tr><td>'+esc(x.name)+'</td><td class="cls">'+esc(x['class'])+'</td>'+
+          '<td class="'+x.state+'">'+x.state+'</td><td>'+x.mailbox+'</td>'+
+          '<td>'+esc(th)+'</td>'+
+          '<td class="fields">'+f+'</td></tr>';
+  }).join('');
+  document.getElementById('abody').innerHTML=rows||'<tr><td colspan="5">(no actors)</td></tr>';
+ }catch(e){}
+}
+let conSince=0;
+async function conTick(){
+ try{ const c=await (await fetch('/api/console?since='+conSince)).json();
+  conSince=c.head;
+  if(c.lines && c.lines.length){
+   const el=document.getElementById('console');
+   if(el.textContent==='(waiting for output...)') el.textContent='';
+   const atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
+   el.textContent += c.lines.join('\n')+'\n';
+   if(el.textContent.length>40000) el.textContent=el.textContent.slice(-40000);
+   if(atBottom) el.scrollTop=el.scrollHeight;
+  }
+ }catch(e){}
+}
+async function loadPrograms(){
+ try{ const p=await (await fetch('/api/programs')).json();
+  const sel=document.getElementById('progsel');
+  if(document.activeElement===sel) return;        // don't fight the user
+  sel.innerHTML=(p.programs||[]).map(x=>
+    '<option value="'+esc(x.key)+'"'+(x.key===p.current?' selected':'')+'>'+esc(x.label)+'</option>').join('');
+ }catch(e){}
+}
+async function switchProgram(){
+ const sel=document.getElementById('progsel');
+ const key=sel.value; if(!key) return;
+ const b=document.getElementById('b_switch'); b.disabled=true; b.textContent='Loading...';
+ try{ await fetch('/api/load',{method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({program:key})});
+  conSince=0; document.getElementById('console').textContent='';
+ }catch(e){}
+ setTimeout(()=>{b.disabled=false;b.textContent='Switch / Load';loadProg();},800);
+}
+loadPrograms(); loadProg(); tick(); conTick();
+setInterval(tick,1000); setInterval(loadProg,5000); setInterval(conTick,500); setInterval(loadPrograms,5000);
+</script></body></html>

@@ -157,6 +157,12 @@ export class Runtime {
       this.createActor(name, expr.className, initArgs);
       return name;              // JS-I はアクターを名前で指す
     }
+    // フィールドを `var xs = array_empty();` のように組込み呼び出しで初期化した場合。
+    // ここに枝が無いと最後の `return 0` に落ち、配列のはずのフィールドが 0 になって
+    // 「a.push is not a function」で初めて分かる（宣言時には何も起きない）。
+    if (expr.type === "CallExpr") {
+      try { return this.evalExpr(expr, {}); } catch (e) { return 0; }
+    }
     if (expr.type === "ArraySized") {
       const dims = expr.dims.map(d => this._evalFieldExpr(d, state) | 0);
       const fill = expr.init === null
@@ -206,8 +212,11 @@ export class Runtime {
     }
     actor.mailbox.push({ methodName, args, unsafe, senderName, slotId });
     this.print(`[send] ${actorName}.${methodName}(${args.join(", ")})`);
+    // 送り手が sleep 中なら、その時間だけ遅れて届く（Py-I の同期 sleep の近似）
+    const from = senderName ? this.actors.get(senderName) : null;
+    const delay = (from && from.__sendDelay) ? from.__sendDelay : 0;
     // Only schedule if not currently inside this actor's invoke
-    if (!actor.processing) this.scheduleActor(actor);
+    if (!actor.processing) this.scheduleActor(actor, delay);
   }
 
   // ---- Reply slot helpers (for now / future / await) ----------------
@@ -299,6 +308,7 @@ export class Runtime {
 
   // Schedule an actor to process its next dispatchable message
   scheduleActor(actor, delayMs = 0) {
+    if (actor.__dead) return;                 // suicide() 済み
     if (actor.processing || actor.scheduled) return;
     actor.scheduled = true;
     setTimeout(() => {
@@ -308,6 +318,7 @@ export class Runtime {
   }
 
   _processNextFor(actor) {
+    if (actor.__dead) { actor.mailbox.length = 0; return; }
     const idx = actor.mailbox.findIndex(msg => actor.methods.has(msg.methodName));
     if (idx < 0) return;
 
@@ -322,6 +333,7 @@ export class Runtime {
 
     const delay = actor.__nextDelay || 0;
     actor.__nextDelay = 0;
+    actor.__sendDelay = 0;                    // sleep の効果はこの本体の中だけ
     if (actor.mailbox.some(m => actor.methods.has(m.methodName))) {
       this.scheduleActor(actor, delay);
     }
@@ -659,6 +671,27 @@ export class Runtime {
           throw new Error("release: resource not held: " + args[0]);
         this._heldRes.delete(args[0]);
         return null;
+      }
+
+      case "sleep": {
+        // Py-I 互換の sleep（秒）。JS-I は同期ブロックできないので wait と同じく
+        // 「このアクターの次のメッセージ処理を遅らせる」形で表す。
+        const secMs = Math.max(0, Math.round((Number(args[0]) || 0) * 1000));
+        if (actor) {
+          actor.__nextDelay = secMs;                                   // 自分の次のメッセージを遅らせる
+          actor.__replyDelayMs = (actor.__replyDelayMs || 0) + secMs;  // 返信も遅らせる
+          // Py-I の sleep はメソッドの途中で止まるので、その後の send も遅れて届く。
+          // JS-I は同期ブロックできないので、「この先この本体から出す send を
+          // その時間だけ遅らせて配る」形で近似する（トークンリングの周回速度が
+          // これを入れないと 1000 倍速になる）。
+          actor.__sendDelay = (actor.__sendDelay || 0) + secMs;
+        }
+        break;
+      }
+      case "suicide": {
+        // Py-I 互換。アクターを終了させる（以後メッセージを処理しない）。
+        if (actor) { actor.__dead = true; actor.mailbox.length = 0; }
+        break;
       }
 
       case "wait": {
@@ -2076,6 +2109,27 @@ export class Runtime {
           case "sqrt":  return Math.sqrt(args[0]);
           case "abs":   return Math.abs(args[0]);
           case "floor": return Math.floor(args[0]);
+          /* ---- 幾何・数値（他の2実装にはある組込み） ---- */
+          case "ceil":  return Math.ceil(args[0]);
+          case "tan":   return Math.tan(args[0]);
+          case "asin":  return Math.asin(Math.max(-1, Math.min(1, Number(args[0]))));
+          case "acos":  return Math.acos(Math.max(-1, Math.min(1, Number(args[0]))));
+          case "atan":  return Math.atan(args[0]);
+          case "atan2": return Math.atan2(args[0], args[1]);
+          case "exp":   return Math.exp(args[0]);
+          case "log":   return Number(args[0]) > 0 ? Math.log(args[0]) : -Infinity;
+          case "pow":   return Math.pow(args[0], args[1]);
+          case "pi":    return Math.PI;
+          /* ---- 配列の組込み ----
+             OCaml 版は copy-on-write（新しい配列を返す）、Py-I はその場で足す
+             （戻り値は unit）。JS-I は**その場で足して同じ配列を返す**ので、
+             `a = array_push(a, v);` と `array_push(a, v);` のどちらの書き方でも
+             同じ結果になる。 */
+          case "array_empty": return [];
+          case "array_len":   return Array.isArray(args[0]) ? args[0].length : 0;
+          case "array_get":   return args[0][Math.trunc(Number(args[1]))];
+          case "array_set":   { const a = args[0]; a[Math.trunc(Number(args[1]))] = args[2]; return a; }
+          case "array_push":  { const a = args[0]; a.push(args[1]); return a; }
           case "rand":  return Math.floor(Math.random() * (Number(args[0]) || 1));
           case "randf": return Math.random() * (Number(args[0]) || 1);
           case "ai_call": {
