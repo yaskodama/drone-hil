@@ -1021,6 +1021,19 @@ export class Runtime {
         break;
       }
 
+      /* ---- 配列（文の形で呼ばれたとき） ----
+         Py-I 流に `array_push(xs, v);` と値を捨てて書くと、ここに枝が無い限り
+         default に落ちて `[call] array_push(...)` を印字するだけの no-op になる。
+         式の形 `xs = array_push(xs, v);`（OCaml 流）だけが動いていた。
+         JS-I の array_push/array_set はその場で足して同じ配列を返すので、
+         ここで同じことをすれば両方の書き方が一致する。 */
+      case "array_push":
+        if (Array.isArray(args[0])) args[0].push(args[1]);
+        break;
+      case "array_set":
+        if (Array.isArray(args[0])) args[0][Math.trunc(Number(args[1]))] = args[2];
+        break;
+
       /* ---- text file I/O (Node host only) ---- */
       case "read_file":   this._fsRead(args[0]); break;
       case "write_file":  this._fsWrite(args[0], args[1], false); break;
