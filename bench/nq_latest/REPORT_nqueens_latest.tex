@@ -1,0 +1,264 @@
+\documentclass[11pt,a4paper]{ltjsarticle}
+\usepackage{luatexja-fontspec}
+\usepackage{amsmath}
+\usepackage[margin=23mm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{cbg}{HTML}{F6F8FA}
+\definecolor{ckw}{HTML}{CF222E}
+\definecolor{ccm}{HTML}{6E7781}
+\definecolor{cst}{HTML}{0A3069}
+\definecolor{cacc}{HTML}{0A5C9E}
+\definecolor{cwarn}{HTML}{B5540A}
+
+\lstset{
+  basicstyle=\ttfamily\scriptsize, keywordstyle=\color{ckw}\bfseries,
+  commentstyle=\color{ccm}\itshape, stringstyle=\color{cst},
+  backgroundcolor=\color{cbg}, frame=single, rulecolor=\color{ccm!40},
+  columns=fullflexible, keepspaces=true, breaklines=true,
+  showstringspaces=false, xleftmargin=6pt, framesep=4pt, numbers=none,
+}
+\captionsetup{font=small,labelfont=bf}
+\setlist[itemize]{leftmargin=1.4em,itemsep=2pt,topsep=3pt}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\title{\textbf{現行 AIPL による N-クイーンズの実機ベンチマーク}\\[5pt]
+\large ―― Xinu / Raspberry Pi 5 上での実測}
+\author{児玉}
+\date{2026 年 8 月 30 日}
+
+\begin{document}
+\maketitle
+
+\begin{quote}\small
+\textbf{要旨}\quad
+現行仕様（2026-07-31 版）の表層構文で書いた N-クイーンズを、
+自作 OS Xinu が走る Raspberry Pi 5 実機の AIPL 実行系に載せて測った。
+$N=4$--$7$ で解の個数は\textbf{すべて厳密解と一致}した。
+一方で所要時間の大半は探索ではなく \textbf{HTTP 往復と JIT コンパイル（中央値 91.8\,ms）}が占め、
+探索そのものが雑音を超えて見えるのは $N \ge 6$ からである。
+$N \ge 8$ は\textbf{完了しない}（アクタが 848 体残ったまま停止する）。
+アクタ 1 体あたりの費用は $N=6$ で 80\,$\mu$s、$N=7$ で 108\,$\mu$s と同じ桁に収まった。
+\end{quote}
+
+\section{測ったもの}
+
+\subsection{対象}
+
+\begin{center}\small
+\begin{tabular}{@{}p{30mm}p{112mm}@{}}
+\toprule
+実行基盤 & Raspberry Pi 5（BCM2712 / Cortex-A76、4 コア稼働）上の自作 Xinu。
+カーネル \code{kernel\_2712.img}、\code{Xinu Round 1 / BCM2712}、EL1 動作 \\
+\addlinespace
+AIPL 実行系 & Mac 側 \code{aipl2c -{}-xinu-jit} が C を生成し、
+\code{POST /actor/load} でボードへ送る。\textbf{ボード上で JIT コンパイルして実行}する \\
+\addlinespace
+言語 & \textbf{現行 AIPL の表層構文}。戻り値注釈 \code{: T}、効果注釈 \code{!\{mut\}}、
+真偽値リテラル \code{true}/\code{false}、文字列連結 \code{++} を使用 \\
+\addlinespace
+測定点 & Mac から見た \code{POST /actor/load} の総所要時間（\code{curl} の \code{time\_total}） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{差し引きの設計}
+
+測定点はネットワーク往復と JIT コンパイルを含んでしまう。そこで各 $N$ について
+\textbf{同一の C コード}を二通りの引数で走らせ、差を取った。
+
+\begin{itemize}
+\item \textbf{本番}：\code{bootstrap(N, 0, N)} ―― 0 行目の列を全部担当する（＝探索する）
+\item \textbf{素通し}：\code{bootstrap(N, 0, 0)} ―― 担当区間が空なので\textbf{探索しない}
+\end{itemize}
+
+素通しは本番と\textbf{バイト数まで同一}（5\,660\,B）なので、
+ネットワーク往復と JIT コンパイルの費用は同じだけかかる。
+両者の差が探索そのものの費用になる。各 $N$ につき 5 回ずつ、
+本番と素通しを交互に、間にアクタ GC を挟んで測った（全 20 組）。
+
+\section{結果}
+
+\subsection{解の正しさ}
+
+\begin{center}\small
+\begin{tabular}{@{}crrrc@{}}
+\toprule
+$N$ & 得られた解の個数 & 厳密解 & 探索木の節点数 & 判定 \\
+\midrule
+4 & 2  & 2  & 17  & 一致（5/5 回） \\
+5 & 10 & 10 & 54  & 一致（5/5 回） \\
+6 & 4  & 4  & 153 & 一致（5/5 回） \\
+7 & 40 & 40 & 552 & 一致（5/5 回） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+20 回すべてで厳密解と一致した。節点数は同じ枝刈りアルゴリズムを Mac 側で数えたもので、
+\textbf{測定値ではなくモデル}である。
+
+\subsection{所要時間}
+
+\begin{center}\small
+\begin{tabular}{@{}crrrrr@{}}
+\toprule
+$N$ & 本番 最小 & 本番 中央値 & 本番 最大 & 探索（中央値$-$基準） & アクタ 1 体あたり \\
+\midrule
+4 & 80.8\,ms  & 92.0\,ms  & 258.7\,ms & $+0.3$\,ms  & ―（雑音以下） \\
+5 & 83.5\,ms  & 87.2\,ms  & 97.8\,ms  & $-4.6$\,ms  & ―（雑音以下） \\
+6 & 99.9\,ms  & 104.0\,ms & 108.3\,ms & $+12.2$\,ms & 80.3\,$\mu$s \\
+7 & 144.1\,ms & 151.2\,ms & 154.3\,ms & $+59.4$\,ms & 107.8\,$\mu$s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+基準（素通し）は全 20 試行を込みにした中央値 \textbf{91.8\,ms}
+（最小 76.4\,ms／最大 100.7\,ms）。
+\textbf{雑音の幅は 24.2\,ms} あり、$N=4,5$ の差はこの中に埋もれている。
+$N=5$ の $-4.6$\,ms という負の値は、探索が速いのではなく
+\textbf{測っていないのと同じ}ということである。
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=13.2cm, height=6.4cm,
+  xlabel={$N$}, ylabel={\code{POST /actor/load} の所要時間 [ms]},
+  xmin=3.4, xmax=7.6, ymin=60, ymax=175,
+  xtick={4,5,6,7}, ytick={60,80,100,120,140,160},
+  grid=major, grid style={ccm!20},
+  label style={font=\small}, tick label style={font=\small},
+  legend style={font=\scriptsize, at={(0.02,0.98)}, anchor=north west, draw=ccm!40},
+]
+% 素通しの帯（76.4 - 100.7 ms）
+\addplot[draw=none, fill=cwarn!12, forget plot]
+  coordinates {(3.4,76.4) (7.6,76.4) (7.6,100.7) (3.4,100.7)} \closedcycle;
+\addplot[cwarn, thick, dashed] coordinates {(3.4,91.8) (7.6,91.8)};
+\addlegendentry{基準（素通し）の中央値 91.8\,ms／帯は最小--最大}
+% 本番の全試行
+\addplot[only marks, mark=*, mark size=1.9pt, cacc] coordinates {
+  (4,80.8) (4,81.7) (4,92.0) (4,134.6) (4,258.7)
+  (5,83.5) (5,87.1) (5,87.2) (5,87.8) (5,97.8)
+  (6,99.9) (6,102.5) (6,104.0) (6,105.6) (6,108.3)
+  (7,144.1) (7,147.7) (7,151.2) (7,152.1) (7,154.3)};
+\addlegendentry{本番（探索あり）の全試行 5 回}
+% 中央値の折れ線
+\addplot[cacc, thick, mark=square*, mark size=2.4pt] coordinates {
+  (4,92.0) (5,87.2) (6,104.0) (7,151.2)};
+\addlegendentry{本番の中央値}
+\end{axis}
+\end{tikzpicture}
+\caption{全試行をそのまま描いた図。$N=4,5$ の点は基準の帯（橙）の中に収まっており、
+探索の費用は測定の雑音より小さい。$N=6$ で帯の上に出て、$N=7$ で明確に離れる。
+$N=4$ の 258.7\,ms は 1 回だけの外れ値で\textbf{図の範囲外}にあり、中央値には効いていない。}
+\end{figure}
+
+\subsection{$N \ge 8$ は完了しない}
+
+$N=8$ を投入すると \code{[NQ] \dots solutions=} の出力が出ず、
+応答は \code{actors: 848 live} で終わる。
+そのあと \code{/actor/send?m=get\_done} を 6 回突ついても \code{done} は立たず、
+解の個数も 0 のままだった。すなわち\textbf{探索木が排出しきれずに止まっている}。
+$N=9$、$N=10$ でも同様で、残存アクタは 1\,014 体、1\,023 体だった
+（アクタ表の上限が 1\,024 であることを示す）。
+
+これは今回の言語追従とは無関係で、\textbf{実行系側の限界}である。
+なお同じ限界は Pi 4 でも記録されている（$N=8$ で未完了）。
+
+\section{読み取れること}
+
+\begin{itemize}
+\item \textbf{現行構文の AIPL が実機で動く。}
+\code{: T}／\code{!\{mut\}}／\code{true}／\code{++} を使ったプログラムが、
+Mac で C に落ち、ボード上で JIT コンパイルされ、正しい答えを返した。
+カーネルの再書き込みは不要だった。
+
+\item \textbf{費用の大半は探索ではない。}
+$N=7$ でさえ、総時間 151\,ms のうち探索は 59\,ms で、残り 92\,ms は
+HTTP 往復と JIT コンパイルである。
+\textbf{このベンチマークは実質的に「実行系の入口の速さ」を測っている}部分が大きい。
+
+\item \textbf{アクタ 1 体あたり約 100\,$\mu$s。}
+$N=6$ で 80\,$\mu$s、$N=7$ で 108\,$\mu$s。生成・メッセージ 1 往復・自殺までを含む値で、
+二つの $N$ で同じ桁に収まったので、スケーリングの目安として使える。
+
+\item \textbf{測れる範囲は狭い。}
+下は雑音（$\pm$24\,ms）に、上はアクタ表と実行予算（$N\le 7$）に挟まれており、
+実質的に $N=6,7$ の 2 点でしか探索費用を語れない。
+\end{itemize}
+
+\section{この測定が示していないこと}
+
+\begin{itemize}
+\item \textbf{Pi 5 が Pi 4 より速いかどうか}は測っていない。今回 Pi 4 と Pi 3 は応答せず、
+実機は Pi 5 の 1 台だけだった。
+\item \textbf{4 コアを使えているか}も測っていない。この N-クイーンズは
+JIT のアクタ実行系の上で動いており、マルチコア並列は既定で無効である
+（別途 \code{/smp-bench} では 4 コアで 3.16 倍が出ている）。
+\item \textbf{分散実行の性能}も測っていない。本プログラムは区間分割
+（\code{bootstrap(n, lo, hi)}）で複数ノードに割れる形になっているが、
+今回は 1 台で \code{lo=0, hi=N} を走らせただけである。
+\item \code{/actor/send} の戻り値が \code{reply} の値を運んでいないため、
+\textbf{解の個数はボードの \code{print} 出力から読んでいる}。
+返り値経路そのものは未検証である。
+\end{itemize}
+
+\section{測定に使ったプログラム（抜粋）}
+
+現行仕様の表層構文を使っている箇所を示す。全文は次の場所にある。
+
+\begin{center}
+\code{\~{}/projects/drone-hil/bench/nq\_latest/nqueens\_latest.aipl}
+\end{center}
+
+\begin{lstlisting}
+class Node {
+  var parent  = nil;          // アクタ参照は nil で初期化する
+  var is_root = false;        // 真偽値リテラル
+  var done    = false;
+
+  method init_parent(par, sl) : unit !{mut} {   // 戻り値注釈 + 効果注釈
+    parent = par;  parent_slot = sl;
+  }
+
+  function safe(cols, r, c) : int { ... }
+
+  method reply(slot, v: int) : unit !{mut} {    // v: int で + を整数加算に固定
+    sumv = sumv + v;  received = received + 1;
+    if (received == expected) {
+      if (is_root == true) {
+        result = sumv;  done = true;
+        print("[NQ] n=7 solutions=" ++ result);  // ++ は文字列連結
+      } else { send parent.reply(parent_slot, sumv); suicide(); }
+    }
+  }
+}
+var root = new Node();        // new に引数は渡せない（send で初期化する）
+send root.bootstrap(7, 0, 7);
+\end{lstlisting}
+
+\section{再現方法}
+
+\begin{lstlisting}
+cd ~/projects/drone-hil/bench/nq_latest
+python3 bench_nq.py 5          # 各 N を 5 回。results.json / summary.json が出る
+\end{lstlisting}
+
+\noindent
+ボードは\textbf{連続したリクエストに弱い}ため、駆動スクリプトは各要求の間に
+2.5 秒の間隔を置き、実行ごとにアクタ GC
+（\code{/api/actors-gc?threshold\_ms=0\&dry=0}）を挟んでいる。
+間隔を置かないと接続が落ち、ボードが死んだように見える（実際は生きている）。
+
+\end{document}

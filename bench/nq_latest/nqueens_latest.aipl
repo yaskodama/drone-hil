@@ -1,0 +1,107 @@
+// nqueens_latest.aipl — 現行 AIPL（2026-07-31 仕様）の表層構文で書いた N-クイーンズ。
+//
+// 旧 dist_nqueens_xinu.aipl からの変更は「書き方」だけで、探索の意味は同じ:
+//   ・戻り値注釈 `: T`      （旧: 注釈なし／`-> T`）
+//   ・効果注釈  `!{mut}`    （状態を書き換えるメソッドに付ける）
+//   ・真偽値リテラル true/false（旧: 1/0）
+//   ・文字列連結 `++`        （旧から使用）
+//
+// aipl2c/Xinu の制約は踏襲する:
+//   ・アクタ・クラスは 1 つだけ（相互再帰クラスは occurs check で落ちる）
+//   ・new に引数を渡さない（new Node(); のあと send で初期化）
+//   ・アクタ参照フィールドは nil で初期化する
+//   ・累算引数に `: int` を付けて `+` を整数加算に固定する
+
+class Node {
+  var parent      = nil;      // 親アクタ（根では nil）
+  var parent_slot = 0;
+  var is_root     = false;
+  var expected    = 0;
+  var received    = 0;
+  var sumv        = 0;
+  var result      = 0;        // 根: この区間の解の個数
+  var done        = false;    // 根: 完了フラグ（HTTP から読む）
+
+  method init_parent(par, sl) : unit !{mut} {
+    parent = par;
+    parent_slot = sl;
+  }
+
+  function safe(cols, r, c) : int {
+    var i = 0;
+    while (i < r) do {
+      var p = array_get(cols, i);
+      if (p == c)         { return 0; }
+      if (p - c == r - i) { return 0; }
+      if (c - p == r - i) { return 0; }
+      i = i + 1;
+    }
+    return 1;
+  }
+
+  // 内部ノード: 行 r に置ける列ごとに子を生み、返信を待つ
+  method compute(cols, r, n) : unit !{mut} {
+    received = 0;  sumv = 0;
+    if (r == n) {
+      send parent.reply(parent_slot, 1);
+      suicide();
+    } else {
+      var c = 0;
+      var n_kids = 0;
+      while (c < n) do {
+        if (safe(cols, r, c)) {
+          var cols2 = array_set(cols, r, c);
+          var child = new Node();
+          send child.init_parent(self, n_kids);
+          send child.compute(cols2, r + 1, n);
+          n_kids = n_kids + 1;
+        }
+        c = c + 1;
+      }
+      expected = n_kids;
+      if (n_kids == 0) {
+        send parent.reply(parent_slot, 0);
+        suicide();
+      }
+    }
+  }
+
+  // 根: 0 行目の列を [lo, hi) だけ担当する（区間分割）
+  method bootstrap(n, lo, hi) : unit !{mut} {
+    is_root = true;  result = 0;  done = false;  received = 0;  sumv = 0;
+    var cols[12];
+    var c = lo;
+    var k = 0;
+    while (c < hi) do {
+      var cols2 = array_set(cols, 0, c);
+      var child = new Node();
+      send child.init_parent(self, k);
+      send child.compute(cols2, 1, n);
+      k = k + 1;
+      c = c + 1;
+    }
+    expected = k;
+    if (k == 0) { done = true; }
+  }
+
+  method reply(slot, v: int) : unit !{mut} {
+    sumv = sumv + v;
+    received = received + 1;
+    if (received == expected) {
+      if (is_root == true) {
+        result = sumv;
+        done = true;
+        print("[NQ] n=__N__ solutions=" ++ result);
+      } else {
+        send parent.reply(parent_slot, sumv);
+        suicide();
+      }
+    }
+  }
+
+  method get_solutions(unused) : int { return result; }
+  method get_done(unused)      : int { return done; }
+}
+
+var root = new Node();
+send root.bootstrap(__N__, __LO__, __HI__);
